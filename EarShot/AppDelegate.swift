@@ -107,6 +107,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Cmd+Shift+E. Toggles pause/resume from any app, no key window required.
     private var pauseHotkey: GlobalHotkey?
 
+    /// Cmd+Shift+B. Drops a named, timestamped bookmark — annotates the
+    /// currently-open session if there is one, otherwise mints a new
+    /// ambient session with the bookmark's label.
+    private var bookmarkHotkey: GlobalHotkey?
+
+    /// Live session tracker. Boots after the speaker library opens;
+    /// closes orphaned sessions from a prior crash and follows mic +
+    /// system pipeline status to open/close one ambient and one call
+    /// session row.
+    private var sessionTracker: SessionTracker?
+
     /// Guards against double-fires (user mashes the hotkey while the engine
     /// is mid-teardown).
     private var pauseInFlight = false
@@ -173,6 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppSettings.runningSessionStartedAt = Date()
 
         registerPauseHotkey()
+        registerBookmarkHotkey()
         startThermalMonitor()
         startSleepWakeMonitor()
         startPeriodicSampler()
@@ -227,6 +239,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // Best-effort fallback if shouldTerminate was bypassed (e.g. SIGTERM).
         pauseHotkey?.unregister()
+        bookmarkHotkey?.unregister()
         thermalMonitor?.stop()
         sleepWakeMonitor?.stop()
         sampleTimer?.invalidate()
@@ -236,6 +249,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func cleanupForTermination() async {
         pauseHotkey?.unregister()
+        bookmarkHotkey?.unregister()
         thermalMonitor?.stop()
         sleepWakeMonitor?.stop()
         sampleTimer?.invalidate()
@@ -253,6 +267,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if let sys = systemPipeline {
             await sys.stop()
+        }
+        // Close any sessions the tracker still has open so the timeline
+        // shows clean ended_at values on the next launch instead of the
+        // boot-time orphan sweep doing it.
+        if let tracker = sessionTracker {
+            await tracker.closeAll()
         }
         await metrics.finalize()
         await transcriptWriter.close()
@@ -294,11 +314,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Pause hotkey
 
     private func registerPauseHotkey() {
-        let hotkey = GlobalHotkey(onPress: { [weak self] in
+        let hotkey = GlobalHotkey(hotkeyID: 1, onPress: { [weak self] in
             self?.togglePause()
         })
         hotkey.register()
         pauseHotkey = hotkey
+    }
+
+    private func registerBookmarkHotkey() {
+        let hotkey = GlobalHotkey(hotkeyID: 2, onPress: { [weak self] in
+            self?.handleBookmarkHotkey()
+        })
+        hotkey.register(
+            keyCode: GlobalHotkey.bookmarkKeyCode,
+            modifiers: GlobalHotkey.bookmarkModifiers
+        )
+        bookmarkHotkey = hotkey
+    }
+
+    /// Capture the moment of the press BEFORE the modal goes up so the
+    /// bookmark timestamps the user's intent, not when they finished
+    /// typing the label.
+    private func handleBookmarkHotkey() {
+        let capturedAt = Date()
+        let alert = NSAlert()
+        alert.messageText = "Drop bookmark"
+        alert.informativeText = "Label this moment. If a session is currently open it will be annotated; otherwise a new ambient session starts here."
+        alert.alertStyle = .informational
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.placeholderString = "e.g. JC 1:1 start"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        // Floating panel inherits .nonactivatingPanel, so the modal must
+        // bring the app forward to take keystrokes for the text field.
+        NSApp.activate(ignoringOtherApps: true)
+        alert.window.initialFirstResponder = field
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+        let trimmed = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        Task { [weak self] in
+            await self?.performBookmark(label: trimmed, at: capturedAt)
+        }
+    }
+
+    private func performBookmark(label: String, at when: Date) async {
+        guard let tracker = sessionTracker else {
+            await MainActor.run {
+                self.presentSimpleAlert(
+                    title: "Bookmark unavailable",
+                    message: "The speaker library isn't ready yet. Finish onboarding and let the mic pipeline boot first."
+                )
+            }
+            return
+        }
+        do {
+            let outcome = try await tracker.recordBookmark(label: label, at: when)
+            if outcome.createdSession {
+                log.info("Bookmark dropped: opened new ambient session id=\(outcome.session.id) labeled \"\(outcome.session.label ?? "?", privacy: .public)\"")
+            } else {
+                log.info("Bookmark dropped: attached to session id=\(outcome.session.id)")
+            }
+        } catch {
+            log.error("Bookmark failed: \(error.localizedDescription, privacy: .public)")
+            await MainActor.run {
+                self.presentSimpleAlert(title: "Bookmark failed", message: error.localizedDescription)
+            }
+        }
     }
 
     func togglePause() {
@@ -382,6 +465,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let library = try SpeakerLibrary()
             _ = try? await library.migrateOwnerEmbeddingFileIfNeeded()
             self.speakerLibrary = library
+
+            // Sessions + bookmarks. Boot first thing after the library
+            // opens so the orphan sweep runs before any pipeline status
+            // event can call into us — otherwise a fast .listening event
+            // could land before the tracker has cleaned the prior run.
+            let tracker = SessionTracker(library: library)
+            await tracker.boot()
+            self.sessionTracker = tracker
+
             let extractor = try await EmbeddingExtractor.boot()
             self.embeddingExtractor = extractor
 
@@ -586,6 +678,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             active = false
         }
         Task { [mergeLayer] in await mergeLayer.setSystemActive(active) }
+        // A call session is one tap-attached stretch: opens on
+        // .listening, closes on anything else. The tracker is idempotent
+        // — a duplicate event is a no-op.
+        if let tracker = sessionTracker {
+            Task { [tracker] in
+                if active {
+                    await tracker.systemStarted()
+                } else {
+                    await tracker.systemStopped()
+                }
+            }
+        }
     }
 
     private func handlePipelineStatus(_ status: MicPipeline.Status) {
@@ -601,15 +705,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 appState.status = .idle
             }
             Task { await metrics.noteListeningStopped() }
+            if let tracker = sessionTracker {
+                Task { [tracker] in await tracker.micStopped() }
+            }
             refreshSurvivalAssertions()
         case .listening:
             appState.status = .listening
             appState.lastErrorMessage = nil
             appState.noteRecoverySucceeded()
             Task { await metrics.noteListeningStarted() }
+            if let tracker = sessionTracker {
+                Task { [tracker] in await tracker.micStarted() }
+            }
             refreshSurvivalAssertions()
         case .paused:
             appState.status = .paused
+            if let tracker = sessionTracker {
+                Task { [tracker] in await tracker.micStopped() }
+            }
             refreshSurvivalAssertions()
         case .failed(let message):
             // CLAUDE.md: glyph error state only after N consecutive failed
@@ -619,6 +732,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // the counter or bump it again.
             appState.lastErrorMessage = message
             Task { await metrics.noteListeningStopped() }
+            if let tracker = sessionTracker {
+                Task { [tracker] in await tracker.micStopped() }
+            }
             refreshSurvivalAssertions()
             let atThreshold = appState.noteRecoveryFailed()
             if atThreshold {

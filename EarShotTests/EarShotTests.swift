@@ -1462,3 +1462,230 @@ struct H1SurvivalAssertionTests {
         #expect(bytes > 0)
     }
 }
+
+// MARK: - Sessions + bookmarks (v4 migration, lifecycle, backfill)
+
+/// Cover the new `sessions` and `bookmarks` tables: open/close lifecycle,
+/// orphan sweep, backfill SQL against an existing segments population,
+/// and bookmark attach-vs-mint behavior. All against an in-memory queue
+/// so migrations run start-to-finish on a clean DB per test.
+struct SessionsTests {
+
+    @Test
+    func openAndCloseRoundTrip() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let start = Date(timeIntervalSince1970: 1_000)
+        let id = try await library.openSession(
+            type: .ambient,
+            source: .mic,
+            label: nil,
+            startedAt: start
+        )
+
+        let open = try await library.currentOpenSession(source: .mic)
+        #expect(open?.id == id)
+        #expect(open?.endedAt == nil)
+        #expect(open?.type == .ambient)
+
+        let stop = Date(timeIntervalSince1970: 1_060)
+        try await library.closeSession(id: id, endedAt: stop)
+
+        let closedOpen = try await library.currentOpenSession(source: .mic)
+        #expect(closedOpen == nil)
+        let all = try await library.listSessions()
+        #expect(all.first?.id == id)
+        #expect(all.first?.endedAt == stop)
+    }
+
+    @Test
+    func currentOpenSessionFiltersBySource() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let micID = try await library.openSession(type: .ambient, source: .mic)
+        let sysID = try await library.openSession(type: .call, source: .system)
+        #expect(micID != sysID)
+
+        let mic = try await library.currentOpenSession(source: .mic)
+        let sys = try await library.currentOpenSession(source: .system)
+        #expect(mic?.id == micID)
+        #expect(sys?.id == sysID)
+        #expect(mic?.id != sys?.id)
+    }
+
+    @Test
+    func closeOrphanedClosesAllStillOpenRows() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let openAt = Date(timeIntervalSince1970: 1_000)
+        _ = try await library.openSession(type: .ambient, source: .mic, startedAt: openAt)
+        _ = try await library.openSession(type: .call, source: .system, startedAt: openAt)
+        let sweepAt = Date(timeIntervalSince1970: 2_000)
+        try await library.closeOrphanedOpenSessions(closingAt: sweepAt)
+
+        let micOpen = try await library.currentOpenSession(source: .mic)
+        let sysOpen = try await library.currentOpenSession(source: .system)
+        #expect(micOpen == nil)
+        #expect(sysOpen == nil)
+
+        let all = try await library.listSessions()
+        #expect(all.allSatisfy { $0.endedAt == sweepAt })
+    }
+
+    /// Rows whose started_at is in the future relative to the sweep
+    /// time stay open — defends against a clock-skew or testing race
+    /// where the current process's freshly-opened row would otherwise
+    /// get clobbered by its own boot sweep.
+    @Test
+    func closeOrphanedSkipsFutureStartedRows() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let futureStart = Date(timeIntervalSince1970: 5_000)
+        _ = try await library.openSession(type: .ambient, source: .mic, startedAt: futureStart)
+        try await library.closeOrphanedOpenSessions(closingAt: Date(timeIntervalSince1970: 1_000))
+        let stillOpen = try await library.currentOpenSession(source: .mic)
+        #expect(stillOpen != nil)
+        #expect(stillOpen?.endedAt == nil)
+    }
+
+    /// Insert raw segments rows via a backdoor SQL path so we can test
+    /// the backfill SQL against a known population. The migration's
+    /// initial backfill ran against an empty segments table, so we
+    /// invoke `backfillSessionsFromSegments` explicitly here.
+    @Test
+    func backfillFromSegmentsGroupsBySourceAndSessionID() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+
+        // session_id is a UUID string in the live path; just use stable
+        // strings here so the assertion is readable.
+        try await library.testInsertSegment(date: "2026-06-12", source: "mic", sessionID: "S-mic-A", startTs: 100, endTs: 110, text: "Hello")
+        try await library.testInsertSegment(date: "2026-06-12", source: "mic", sessionID: "S-mic-A", startTs: 120, endTs: 135, text: "World")
+        try await library.testInsertSegment(date: "2026-06-12", source: "system", sessionID: "S-sys-1", startTs: 200, endTs: 220, text: "Remote")
+        try await library.testInsertSegment(date: "2026-06-13", source: "system", sessionID: "S-sys-2", startTs: 1000, endTs: 1010, text: "Other call")
+
+        let inserted = try await library.backfillSessionsFromSegments()
+        #expect(inserted == 3)
+
+        let sessions = try await library.listSessions()
+        #expect(sessions.count == 3)
+        let mic = sessions.first { $0.source == .mic }
+        #expect(mic?.type == .ambient)
+        #expect(mic?.startedAt == Date(timeIntervalSince1970: 100))
+        #expect(mic?.endedAt == Date(timeIntervalSince1970: 135))
+
+        let calls = sessions.filter { $0.source == .system }
+        #expect(calls.count == 2)
+        #expect(calls.allSatisfy { $0.type == .call })
+    }
+
+    /// Empty session_id strings are excluded by the backfill (so a
+    /// future writer that leaves session_id blank doesn't mint a phantom
+    /// session for every such row).
+    @Test
+    func backfillSkipsEmptySessionIDs() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        try await library.testInsertSegment(date: "2026-06-12", source: "mic", sessionID: "", startTs: 100, endTs: 110, text: "Hello")
+        let inserted = try await library.backfillSessionsFromSegments()
+        #expect(inserted == 0)
+    }
+}
+
+struct BookmarkTests {
+
+    @Test
+    func bookmarkWithoutOpenSessionMintsAmbient() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let when = Date(timeIntervalSince1970: 500)
+        let outcome = try await library.addBookmark(label: "JC 1:1 start", capturedAt: when)
+
+        #expect(outcome.createdSession)
+        #expect(outcome.session.type == .ambient)
+        #expect(outcome.session.source == .mic)
+        #expect(outcome.session.label == "JC 1:1 start")
+        #expect(outcome.session.startedAt == when)
+        #expect(outcome.session.endedAt == nil)
+        #expect(outcome.bookmark.label == "JC 1:1 start")
+        #expect(outcome.bookmark.sessionID == outcome.session.id)
+
+        let bookmarks = try await library.listBookmarks()
+        #expect(bookmarks.count == 1)
+        #expect(bookmarks.first?.id == outcome.bookmark.id)
+    }
+
+    @Test
+    func bookmarkAttachesToOpenSession() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let openStart = Date(timeIntervalSince1970: 1000)
+        let bookmarkAt = Date(timeIntervalSince1970: 1100)
+        let openID = try await library.openSession(
+            type: .ambient,
+            source: .mic,
+            startedAt: openStart
+        )
+        let outcome = try await library.addBookmark(label: "midpoint", capturedAt: bookmarkAt)
+        #expect(!outcome.createdSession)
+        #expect(outcome.session.id == openID)
+        #expect(outcome.bookmark.sessionID == openID)
+    }
+
+    /// Multiple bookmarks against the same open session all link to it.
+    @Test
+    func multipleBookmarksAttachToSameOpenSession() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let openID = try await library.openSession(
+            type: .ambient,
+            source: .mic,
+            startedAt: Date(timeIntervalSince1970: 1000)
+        )
+        _ = try await library.addBookmark(label: "first", capturedAt: Date(timeIntervalSince1970: 1100))
+        _ = try await library.addBookmark(label: "second", capturedAt: Date(timeIntervalSince1970: 1200))
+
+        let inSession = try await library.listBookmarks(sessionID: openID)
+        #expect(inSession.count == 2)
+        #expect(inSession.map(\.label) == ["first", "second"])  // ASC by captured_at
+    }
+
+    @Test
+    func emptyLabelThrows() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        await #expect(throws: SpeakerLibrary.SessionError.self) {
+            _ = try await library.addBookmark(label: "   ", capturedAt: Date())
+        }
+    }
+
+    /// A bookmark dropped before any open session exists creates a
+    /// session; a second bookmark dropped right after (still before the
+    /// first session is closed) attaches to that newly-minted session.
+    @Test
+    func consecutiveBookmarksReuseTheMintedSession() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let t0 = Date(timeIntervalSince1970: 500)
+        let t1 = Date(timeIntervalSince1970: 510)
+        let first = try await library.addBookmark(label: "Start", capturedAt: t0)
+        let second = try await library.addBookmark(label: "Note", capturedAt: t1)
+        #expect(first.createdSession)
+        #expect(!second.createdSession)
+        #expect(second.session.id == first.session.id)
+    }
+}
+
+/// Backdoor used by the backfill tests. Real callers go through
+/// `SpeakerLibrary.indexSegment` from the merge layer's forwarder.
+extension SpeakerLibrary {
+    func testInsertSegment(
+        date: String,
+        source: String,
+        sessionID: String,
+        startTs: Double,
+        endTs: Double,
+        text: String
+    ) async throws {
+        let record = SegmentRecord(
+            speakerID: nil,
+            context: source == "system" ? .system : .mic,
+            sessionID: sessionID,
+            startedAt: Date(timeIntervalSince1970: startTs),
+            endedAt: Date(timeIntervalSince1970: endTs),
+            dateKey: date,
+            text: text,
+            provisional: true
+        )
+        _ = try indexSegment(record)
+    }
+}

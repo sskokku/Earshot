@@ -232,6 +232,61 @@ actor SpeakerLibrary {
                 )
                 """)
         }
+
+        // Sessions + bookmarks. A session is a bounded stretch with
+        // start, end (NULL while open), type (call/ambient), source
+        // (mic/system/both), and an optional user label. The next chunk
+        // renders these on a timeline; this chunk owns the data model
+        // and the live tracker.
+        //
+        // Backfill at migration time: every existing (source, session_id)
+        // group in the segments table is one historical session row.
+        // type = 'call' for system, else 'ambient'. started_at = MIN,
+        // ended_at = MAX. No label (the timeline UI in the next chunk
+        // will let the user retroactively attach one).
+        migrator.registerMigration("v4_sessions_and_bookmarks") { db in
+            try db.execute(sql: """
+                CREATE TABLE sessions (
+                    id INTEGER PRIMARY KEY,
+                    type TEXT NOT NULL CHECK (type IN ('call','ambient')),
+                    source TEXT NOT NULL CHECK (source IN ('mic','system','both')),
+                    label TEXT,
+                    started_at REAL NOT NULL,
+                    ended_at REAL,
+                    created_at TEXT NOT NULL
+                )
+                """)
+            try db.execute(sql: "CREATE INDEX idx_sessions_started_at ON sessions(started_at)")
+            try db.execute(sql: "CREATE INDEX idx_sessions_ended_at ON sessions(ended_at)")
+
+            try db.execute(sql: """
+                CREATE TABLE bookmarks (
+                    id INTEGER PRIMARY KEY,
+                    session_id INTEGER REFERENCES sessions(id),
+                    label TEXT NOT NULL,
+                    captured_at REAL NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """)
+            try db.execute(sql: "CREATE INDEX idx_bookmarks_captured_at ON bookmarks(captured_at)")
+            try db.execute(sql: "CREATE INDEX idx_bookmarks_session_id ON bookmarks(session_id)")
+
+            try db.execute(
+                sql: """
+                    INSERT INTO sessions (type, source, started_at, ended_at, created_at)
+                    SELECT
+                        CASE WHEN source = 'system' THEN 'call' ELSE 'ambient' END,
+                        source,
+                        MIN(start_ts),
+                        MAX(end_ts),
+                        ?
+                    FROM segments
+                    WHERE session_id IS NOT NULL AND session_id <> ''
+                    GROUP BY source, session_id
+                    """,
+                arguments: [SpeakerLibrary.timestampString()]
+            )
+        }
         return migrator
     }
 
@@ -1469,6 +1524,350 @@ actor SpeakerLibrary {
         let label = String(rest[..<labelEnd.lowerBound])
         let text = String(rest[labelEnd.upperBound...])
         return (time, source, label, text)
+    }
+
+    // MARK: - Sessions and bookmarks
+
+    /// A bounded stretch of listening. `endedAt == nil` while the
+    /// session is open. `label` is user-supplied (currently only set via
+    /// a bookmark drop that mints a new session).
+    struct Session: Sendable, Equatable, Identifiable {
+        enum Kind: String, Sendable, CaseIterable {
+            case call
+            case ambient
+        }
+        enum Source: String, Sendable, CaseIterable {
+            case mic
+            case system
+            case both
+        }
+        let id: Int64
+        let type: Kind
+        let source: Source
+        let label: String?
+        let startedAt: Date
+        let endedAt: Date?
+    }
+
+    /// A user-named, timestamped boundary. Always belongs to a session
+    /// (a bookmark drop either annotates an open session or starts a
+    /// fresh one, so `sessionID` is non-nil for every freshly-inserted
+    /// row; the FK is nullable purely so a future "delete session" path
+    /// can null out orphans rather than cascade-delete bookmarks).
+    struct Bookmark: Sendable, Equatable, Identifiable {
+        let id: Int64
+        let sessionID: Int64?
+        let label: String
+        let capturedAt: Date
+    }
+
+    /// Result of a bookmark drop. `bookmark` is the row inserted; if
+    /// no session was open at `capturedAt`, a fresh ambient session was
+    /// minted with the bookmark's label, and `createdSession` is true.
+    struct BookmarkOutcome: Sendable, Equatable {
+        let bookmark: Bookmark
+        let session: Session
+        let createdSession: Bool
+    }
+
+    enum SessionError: LocalizedError {
+        case emptyLabel
+
+        var errorDescription: String? {
+            switch self {
+            case .emptyLabel: return "Bookmark label cannot be empty."
+            }
+        }
+    }
+
+    /// Insert a new session row. Returns the row id so the live tracker
+    /// can close it on pipeline stop. Caller is responsible for calling
+    /// `closeSession` — leaving rows open is benign (they get closed at
+    /// the next launch by `closeOrphanedOpenSessions`) but the timeline
+    /// UX prefers a clean ended_at.
+    @discardableResult
+    func openSession(
+        type: Session.Kind,
+        source: Session.Source,
+        label: String? = nil,
+        startedAt: Date = Date()
+    ) throws -> Int64 {
+        let nowText = SpeakerLibrary.timestampString()
+        return try dbQueue.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO sessions (type, source, label, started_at, ended_at, created_at)
+                    VALUES (?, ?, ?, ?, NULL, ?)
+                    """,
+                arguments: [
+                    type.rawValue,
+                    source.rawValue,
+                    label,
+                    startedAt.timeIntervalSince1970,
+                    nowText
+                ]
+            )
+            return db.lastInsertedRowID
+        }
+    }
+
+    /// Close a session row by setting `ended_at`. A re-close just
+    /// overwrites the existing ended_at — used by
+    /// `closeOrphanedOpenSessions` at boot, and tolerable if the live
+    /// tracker hits a duplicate status event.
+    func closeSession(id: Int64, endedAt: Date = Date()) throws {
+        try dbQueue.write { db in
+            try db.execute(
+                sql: "UPDATE sessions SET ended_at = ? WHERE id = ?",
+                arguments: [endedAt.timeIntervalSince1970, id]
+            )
+        }
+    }
+
+    /// Most-recently-started open session matching `source`, or nil if
+    /// none. The live tracker uses this on boot so a pipeline that was
+    /// already counted as "started" by a quick subsequent pause doesn't
+    /// open a second row.
+    func currentOpenSession(source: Session.Source) throws -> Session? {
+        try dbQueue.read { db in
+            let row = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT id, type, source, label, started_at, ended_at
+                    FROM sessions
+                    WHERE source = ? AND ended_at IS NULL
+                    ORDER BY started_at DESC
+                    LIMIT 1
+                    """,
+                arguments: [source.rawValue]
+            )
+            return row.flatMap(Self.session(from:))
+        }
+    }
+
+    /// Most-recently-started open session whose started_at <= `moment`.
+    /// Used by `addBookmark` to decide attach-vs-mint.
+    func openSessionContaining(_ moment: Date) throws -> Session? {
+        let ts = moment.timeIntervalSince1970
+        return try dbQueue.read { db in
+            let row = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT id, type, source, label, started_at, ended_at
+                    FROM sessions
+                    WHERE ended_at IS NULL AND started_at <= ?
+                    ORDER BY started_at DESC
+                    LIMIT 1
+                    """,
+                arguments: [ts]
+            )
+            return row.flatMap(Self.session(from:))
+        }
+    }
+
+    /// All sessions, most-recent-first. Used by the upcoming timeline
+    /// UI and by tests that inspect the backfill result.
+    func listSessions(limit: Int = 200) throws -> [Session] {
+        try dbQueue.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT id, type, source, label, started_at, ended_at
+                    FROM sessions
+                    ORDER BY started_at DESC
+                    LIMIT ?
+                    """,
+                arguments: [limit]
+            )
+            return rows.compactMap(Self.session(from:))
+        }
+    }
+
+    /// Close every still-open session row at boot. Idempotent: rows
+    /// with non-nil ended_at are untouched. Sessions opened in the
+    /// future (clock skew) are also skipped so we don't clobber a row
+    /// that the current process just opened.
+    func closeOrphanedOpenSessions(closingAt: Date = Date()) throws {
+        let nowTs = closingAt.timeIntervalSince1970
+        try dbQueue.write { db in
+            try db.execute(
+                sql: """
+                    UPDATE sessions
+                    SET ended_at = ?
+                    WHERE ended_at IS NULL AND started_at <= ?
+                    """,
+                arguments: [nowTs, nowTs]
+            )
+        }
+    }
+
+    /// Drop a timestamped, named bookmark. If an open session covers
+    /// `capturedAt`, the bookmark is attached to it. Otherwise a fresh
+    /// ambient session (source = mic) is minted with the bookmark's
+    /// label, started_at = capturedAt, ended_at NULL. Throws
+    /// `SessionError.emptyLabel` if the trimmed label is empty.
+    @discardableResult
+    func addBookmark(label: String, capturedAt: Date = Date()) throws -> BookmarkOutcome {
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw SessionError.emptyLabel }
+        let capturedTs = capturedAt.timeIntervalSince1970
+        let nowText = SpeakerLibrary.timestampString()
+
+        return try dbQueue.write { db in
+            let openRow = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT id, type, source, label, started_at, ended_at
+                    FROM sessions
+                    WHERE ended_at IS NULL AND started_at <= ?
+                    ORDER BY started_at DESC
+                    LIMIT 1
+                    """,
+                arguments: [capturedTs]
+            )
+
+            let session: Session
+            let created: Bool
+            if let openRow, let existing = Self.session(from: openRow) {
+                session = existing
+                created = false
+            } else {
+                try db.execute(
+                    sql: """
+                        INSERT INTO sessions (type, source, label, started_at, ended_at, created_at)
+                        VALUES ('ambient', 'mic', ?, ?, NULL, ?)
+                        """,
+                    arguments: [trimmed, capturedTs, nowText]
+                )
+                let newID = db.lastInsertedRowID
+                session = Session(
+                    id: newID,
+                    type: .ambient,
+                    source: .mic,
+                    label: trimmed,
+                    startedAt: capturedAt,
+                    endedAt: nil
+                )
+                created = true
+            }
+
+            try db.execute(
+                sql: """
+                    INSERT INTO bookmarks (session_id, label, captured_at, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                arguments: [session.id, trimmed, capturedTs, nowText]
+            )
+            let bookmarkID = db.lastInsertedRowID
+            let bookmark = Bookmark(
+                id: bookmarkID,
+                sessionID: session.id,
+                label: trimmed,
+                capturedAt: capturedAt
+            )
+            return BookmarkOutcome(bookmark: bookmark, session: session, createdSession: created)
+        }
+    }
+
+    /// Bookmarks ordered by capture time. When `sessionID` is non-nil
+    /// the result is filtered to that session and ordered ASC (so the
+    /// timeline can render them in stroll order); otherwise the result
+    /// is DESC across all sessions (newest first).
+    func listBookmarks(sessionID: Int64? = nil, limit: Int = 500) throws -> [Bookmark] {
+        try dbQueue.read { db in
+            let rows: [Row]
+            if let sessionID {
+                rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT id, session_id, label, captured_at
+                        FROM bookmarks
+                        WHERE session_id = ?
+                        ORDER BY captured_at ASC
+                        LIMIT ?
+                        """,
+                    arguments: [sessionID, limit]
+                )
+            } else {
+                rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT id, session_id, label, captured_at
+                        FROM bookmarks
+                        ORDER BY captured_at DESC
+                        LIMIT ?
+                        """,
+                    arguments: [limit]
+                )
+            }
+            return rows.compactMap(Self.bookmark(from:))
+        }
+    }
+
+    /// Re-run the v4 backfill against the current `segments` table.
+    /// Idempotent only in the trivial sense that running it twice
+    /// produces duplicate session rows for the same (source,
+    /// session_id) groups — used by tests and exposed for a future
+    /// admin path. Returns the number of rows inserted.
+    @discardableResult
+    func backfillSessionsFromSegments() throws -> Int {
+        let nowText = SpeakerLibrary.timestampString()
+        return try dbQueue.write { db in
+            let before = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sessions") ?? 0
+            try db.execute(
+                sql: """
+                    INSERT INTO sessions (type, source, started_at, ended_at, created_at)
+                    SELECT
+                        CASE WHEN source = 'system' THEN 'call' ELSE 'ambient' END,
+                        source,
+                        MIN(start_ts),
+                        MAX(end_ts),
+                        ?
+                    FROM segments
+                    WHERE session_id IS NOT NULL AND session_id <> ''
+                    GROUP BY source, session_id
+                    """,
+                arguments: [nowText]
+            )
+            let after = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sessions") ?? 0
+            return after - before
+        }
+    }
+
+    // MARK: - Session row mapping
+
+    private static func session(from row: Row) -> Session? {
+        let id: Int64 = row["id"]
+        guard let typeStr: String = row["type"],
+              let type = Session.Kind(rawValue: typeStr),
+              let sourceStr: String = row["source"],
+              let source = Session.Source(rawValue: sourceStr) else {
+            return nil
+        }
+        let label: String? = row["label"]
+        let startedTs: Double = row["started_at"]
+        let endedTs: Double? = row["ended_at"]
+        return Session(
+            id: id,
+            type: type,
+            source: source,
+            label: label,
+            startedAt: Date(timeIntervalSince1970: startedTs),
+            endedAt: endedTs.map { Date(timeIntervalSince1970: $0) }
+        )
+    }
+
+    private static func bookmark(from row: Row) -> Bookmark? {
+        let id: Int64 = row["id"]
+        let sessionID: Int64? = row["session_id"]
+        let label: String = row["label"] ?? ""
+        let capturedTs: Double = row["captured_at"]
+        return Bookmark(
+            id: id,
+            sessionID: sessionID,
+            label: label,
+            capturedAt: Date(timeIntervalSince1970: capturedTs)
+        )
     }
 
     // MARK: - S4 errors

@@ -19,17 +19,29 @@ import os
 ///    in CLAUDE.md's long-run survival checklist.
 @MainActor
 final class GlobalHotkey {
-    /// Cmd+Shift+E. Matches PRD R7 default.
+    /// Cmd+Shift+E. Matches PRD R7 default (pause/resume).
     nonisolated static let defaultKeyCode: UInt32 = UInt32(kVK_ANSI_E)
     nonisolated static let defaultModifiers: UInt32 = UInt32(cmdKey | shiftKey)
+
+    /// Cmd+Shift+B. Bookmark drop hotkey — prompts for a label and
+    /// inserts a `bookmarks` row, optionally starting a new ambient
+    /// session if none is open.
+    nonisolated static let bookmarkKeyCode: UInt32 = UInt32(kVK_ANSI_B)
+    nonisolated static let bookmarkModifiers: UInt32 = UInt32(cmdKey | shiftKey)
 
     private let log = Logger(subsystem: "com.earshot.app", category: "GlobalHotkey")
 
     private var hotKeyRef: EventHotKeyRef?
     private var handlerRef: EventHandlerRef?
     private let onPress: () -> Void
+    private let hotkeyID: UInt32
 
-    init(onPress: @escaping () -> Void) {
+    /// `hotkeyID` distinguishes multiple `GlobalHotkey` instances under
+    /// the same Carbon signature. Two registered hotkeys must use
+    /// different ids; otherwise Carbon collapses them onto the same
+    /// routing slot and only one handler fires.
+    init(hotkeyID: UInt32 = 1, onPress: @escaping () -> Void) {
+        self.hotkeyID = hotkeyID
         self.onPress = onPress
     }
 
@@ -46,7 +58,7 @@ final class GlobalHotkey {
         // 4-byte signature ("ERSH" → Earshot). Carbon needs SOMETHING unique
         // to match our hotkey ID against the handler routing.
         let signature: OSType = 0x45525348
-        let hotKeyID = EventHotKeyID(signature: signature, id: 1)
+        let hotKeyID = EventHotKeyID(signature: signature, id: hotkeyID)
 
         var eventSpec = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),
