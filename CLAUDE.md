@@ -8,6 +8,7 @@
 - If approaching usage limits mid-chunk: stop at the nearest compilable state, commit with a WIP message describing exactly what remains, and end the session.
 - Ask clarifying questions before starting a chunk if the spec is ambiguous; never improvise on architecture rules below.
 - Human-only steps (flag them, do not attempt): signing team, granting macOS permission dialogs, multi-hour soak runs.
+- LOCAL COMMITS ONLY, NEVER PUSH. At the end of every chunk, commit locally with a descriptive message. NEVER run `git push` to any remote under any circumstance. After committing, run `git status` and `git log --oneline -5`, then report "repo is ready for you to push after review." The human owns all pushes — no exceptions, no "just this once," no `--force`, no remote operations of any kind.
 
 ## What this is
 macOS menu bar app: always-on ambient transcription with voice-based speaker identification and persistent speaker memory. Fully on-device. See PRD.md for requirements, BUILD_PLAN.md for phases.
