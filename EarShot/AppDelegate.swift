@@ -76,6 +76,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Singleton so we don't accumulate one window per click.
     private let transcriptReaderController = TranscriptReaderWindowController()
 
+    /// Timeline window + curation (redaction) surface. One model, one
+    /// window, opened on demand. The window reads SQLite directly so its
+    /// state is independent of the live pipeline — the controller is
+    /// safe to construct as soon as the speaker library opens.
+    private var timelineWindowModel: TimelineWindowModel?
+    private var timelineWindowController: TimelineWindowController?
+
     /// S4 — recorder + downloader reused by the speaker window's
     /// "Re-enroll Me" flow. Lazy so they only initialize when needed.
     private let enrollmentRecorder = EnrollmentRecorder()
@@ -489,6 +496,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // floating panel are live.
             setupSpeakerLibraryWindow(library: library, resolver: resolver)
             setupTranscriptSearchWindow(library: library)
+            setupTimelineWindow(library: library)
             wirePanelActions(library: library)
 
             let pipeline = MicPipeline(asr: asrManager, vad: vad)
@@ -911,6 +919,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // silently no-op-ing so the user knows search will be live
             // after onboarding completes.
             presentSimpleAlert(title: "Search", message: "Search index not ready yet. Finish onboarding and let the mic pipeline boot first.")
+        }
+    }
+
+    // MARK: - Timeline window + curation
+
+    private func setupTimelineWindow(library: SpeakerLibrary) {
+        let today = Self.transcriptDateKey(from: Date())
+        let model = TimelineWindowModel(
+            library: library,
+            writer: transcriptWriter,
+            initialDateKey: today
+        )
+        model.onOpenSession = { [weak self] session in
+            self?.openTranscriptReader(for: session)
+        }
+        self.timelineWindowModel = model
+        self.timelineWindowController = TimelineWindowController(model: model)
+    }
+
+    func showTimelineWindow() {
+        if let controller = timelineWindowController {
+            // Reset to today every time the user re-opens the window so
+            // the freshly-presented timeline is anchored on whatever day
+            // it is now — a user who opened it yesterday and never closed
+            // shouldn't see stale data unless they navigated away.
+            timelineWindowModel?.setDate(Date())
+            controller.show()
+        } else {
+            presentSimpleAlert(title: "Timeline", message: "Library not loaded yet. Finish onboarding and let the mic pipeline boot first.")
+        }
+    }
+
+    /// Click handler for a session block on the timeline. Looks up the
+    /// session's first segment via SQL and opens that day's transcript
+    /// reader scrolled to it. If the session is empty (no segments yet,
+    /// e.g. a bookmark-only session), opens the reader without focus.
+    private func openTranscriptReader(for session: SpeakerLibrary.Session) {
+        guard let library = speakerLibrary else { return }
+        let folder = AppSettings.transcriptsFolder
+        Task { [weak self] in
+            let context: SpeakerLibrary.Context
+            switch session.source {
+            case .mic: context = .mic
+            case .system: context = .system
+            case .both: context = .mic
+            }
+            let endBound = session.endedAt ?? Date()
+            let focusOrNil: TranscriptReaderModel.Focus?
+            let dateKey: String
+            do {
+                if let first = try await library.firstSegmentFocus(
+                    start: session.startedAt,
+                    end: endBound,
+                    source: context
+                ) {
+                    focusOrNil = TranscriptReaderModel.Focus(
+                        time: first.time,
+                        source: first.source,
+                        text: first.text
+                    )
+                    dateKey = first.dateKey.isEmpty
+                        ? Self.transcriptDateKey(from: session.startedAt)
+                        : first.dateKey
+                } else {
+                    focusOrNil = nil
+                    dateKey = Self.transcriptDateKey(from: session.startedAt)
+                }
+            } catch {
+                focusOrNil = nil
+                dateKey = Self.transcriptDateKey(from: session.startedAt)
+            }
+            await MainActor.run {
+                self?.transcriptReaderController.show(
+                    transcriptFolder: folder,
+                    dateKey: dateKey,
+                    focus: focusOrNil
+                )
+            }
         }
     }
 

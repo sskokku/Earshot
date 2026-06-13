@@ -13,6 +13,7 @@ struct MenuBarContent: View {
     let onDumpSpeakers: () -> Void
     let onOpenSpeakerLibrary: () -> Void
     let onOpenTranscriptSearch: () -> Void
+    let onOpenTimeline: () -> Void
 
     var body: some View {
         Text("EarShot — \(appState.status.label)")
@@ -41,6 +42,11 @@ struct MenuBarContent: View {
             onOpenTranscriptSearch()
         }
         .keyboardShortcut("f", modifiers: [.command])
+
+        Button("Timeline…") {
+            onOpenTimeline()
+        }
+        .keyboardShortcut("t", modifiers: [.command, .shift])
 
         Button("Settings…") {
             settingsController.show()

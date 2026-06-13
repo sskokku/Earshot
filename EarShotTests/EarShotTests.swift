@@ -1665,6 +1665,328 @@ struct BookmarkTests {
     }
 }
 
+// MARK: - Timeline + curation (redaction)
+
+/// Cover the timeline window's persistent surface (`timelineForDay`,
+/// `firstSegmentFocus`) and the curation pipeline (`previewRedaction`,
+/// `redactRange`). All tests run against an in-memory queue so the v4
+/// migration applies cleanly and segments / sessions / bookmarks live
+/// only as long as the test does.
+struct TimelineQueryTests {
+
+    @Test
+    func timelineForDayReturnsIntersectingSessionsAndBookmarks() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        guard let dayStart = SpeakerLibrary.dayKeyFormatter.date(from: "2026-06-13") else {
+            Issue.record("day parser failed")
+            return
+        }
+        // Session intersecting the visible day (started yesterday, ends today).
+        let crossMidnight = dayStart.addingTimeInterval(-1800)
+        let endsToday = dayStart.addingTimeInterval(7200)
+        let crossID = try await library.openSession(
+            type: .ambient, source: .mic, label: "Overnight", startedAt: crossMidnight
+        )
+        try await library.closeSession(id: crossID, endedAt: endsToday)
+        // Session inside the visible day.
+        let middayStart = dayStart.addingTimeInterval(43_200) // noon
+        let middayEnd = dayStart.addingTimeInterval(45_000)
+        let middayID = try await library.openSession(
+            type: .call, source: .system, label: "Call A", startedAt: middayStart
+        )
+        try await library.closeSession(id: middayID, endedAt: middayEnd)
+        // Session that ended yesterday — not visible.
+        let priorStart = dayStart.addingTimeInterval(-7200)
+        let priorEnd = dayStart.addingTimeInterval(-3600)
+        let priorID = try await library.openSession(
+            type: .ambient, source: .mic, label: "Yesterday", startedAt: priorStart
+        )
+        try await library.closeSession(id: priorID, endedAt: priorEnd)
+        // Bookmark inside the day.
+        _ = try await library.addBookmark(label: "midpoint", capturedAt: middayStart.addingTimeInterval(60))
+
+        let timeline = try await library.timelineForDay("2026-06-13")
+        let visibleIDs = Set(timeline.sessions.map(\.id))
+        #expect(visibleIDs.contains(crossID))
+        #expect(visibleIDs.contains(middayID))
+        #expect(!visibleIDs.contains(priorID))
+        #expect(timeline.bookmarks.count == 1)
+        #expect(timeline.bookmarks.first?.label == "midpoint")
+    }
+
+    @Test
+    func firstSegmentFocusReturnsFirstInSourceWindow() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let s = Date(timeIntervalSince1970: 1_700_000_000)
+        try await library.testInsertSegment(date: "2026-06-13", source: "mic", sessionID: "S1", startTs: s.timeIntervalSince1970 + 1, endTs: s.timeIntervalSince1970 + 2, text: "first mic")
+        try await library.testInsertSegment(date: "2026-06-13", source: "system", sessionID: "S2", startTs: s.timeIntervalSince1970 + 3, endTs: s.timeIntervalSince1970 + 4, text: "first system")
+        let focus = try await library.firstSegmentFocus(
+            start: s,
+            end: s.addingTimeInterval(60),
+            source: .mic
+        )
+        #expect(focus?.text == "first mic")
+        #expect(focus?.source == "mic")
+    }
+}
+
+struct RedactionTests {
+
+    @Test
+    func previewRedactionListsInRangeSegmentsOnly() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        try await library.testInsertSegment(date: "2026-06-13", source: "mic", sessionID: "A", startTs: 1000, endTs: 1010, text: "inside one")
+        try await library.testInsertSegment(date: "2026-06-13", source: "mic", sessionID: "A", startTs: 1020, endTs: 1030, text: "inside two")
+        try await library.testInsertSegment(date: "2026-06-13", source: "mic", sessionID: "A", startTs: 5000, endTs: 5010, text: "outside")
+
+        let rows = try await library.previewRedaction(
+            start: Date(timeIntervalSince1970: 900),
+            end: Date(timeIntervalSince1970: 1100),
+            sources: nil
+        )
+        #expect(rows.count == 2)
+        #expect(rows.map(\.text) == ["inside one", "inside two"])
+    }
+
+    @Test
+    func previewRedactionRespectsSourceFilter() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        try await library.testInsertSegment(date: "2026-06-13", source: "mic", sessionID: "A", startTs: 1000, endTs: 1010, text: "mic only")
+        try await library.testInsertSegment(date: "2026-06-13", source: "system", sessionID: "B", startTs: 1005, endTs: 1015, text: "system only")
+
+        let micRows = try await library.previewRedaction(
+            start: Date(timeIntervalSince1970: 900),
+            end: Date(timeIntervalSince1970: 1100),
+            sources: [.mic]
+        )
+        #expect(micRows.count == 1)
+        #expect(micRows.first?.text == "mic only")
+    }
+
+    @Test
+    func redactRangeDeletesSegmentsAndPurgesFtsIndex() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let speaker = try await library.createUnnamedSpeaker()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        // The FTS5 mirror updates via the GRDB-installed sync triggers
+        // on INSERT. Index two segments, confirm both are searchable,
+        // redact one, confirm only the survivor comes back.
+        let recordA = SpeakerLibrary.SegmentRecord(
+            speakerID: speaker.speakerID,
+            context: .mic,
+            sessionID: "A",
+            startedAt: now,
+            endedAt: now.addingTimeInterval(2),
+            dateKey: "2026-06-13",
+            text: "redactable secret phrase",
+            provisional: true
+        )
+        let recordB = SpeakerLibrary.SegmentRecord(
+            speakerID: speaker.speakerID,
+            context: .mic,
+            sessionID: "A",
+            startedAt: now.addingTimeInterval(3600),
+            endedAt: now.addingTimeInterval(3602),
+            dateKey: "2026-06-13",
+            text: "another phrase keeps secret",
+            provisional: true
+        )
+        _ = try await library.indexSegment(recordA)
+        _ = try await library.indexSegment(recordB)
+
+        let preHits = try await library.searchSegments(query: "secret")
+        #expect(preHits.count == 2)
+
+        let folder = makeScratchFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let writer = TranscriptWriter(folder: folder)
+
+        let outcome = try await library.redactRange(
+            start: now.addingTimeInterval(-1),
+            end: now.addingTimeInterval(60),
+            sources: nil,
+            transcriptFolder: folder,
+            writer: writer
+        )
+        #expect(outcome.segmentsDeleted == 1)
+
+        let postHits = try await library.searchSegments(query: "secret")
+        #expect(postHits.count == 1)
+        #expect(postHits.first?.text.contains("another") == true)
+    }
+
+    @Test
+    func redactRangeRewritesDayMarkdownInPlace() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let folder = makeScratchFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        // Seed a transcript file with three canonical lines + a header.
+        // The redaction matches by (HH:MM:SS, source, text) so the times
+        // we encode must match what we feed to indexSegment.
+        let day = "2026-06-13"
+        let url = folder.appendingPathComponent("\(day).md", isDirectory: false)
+        let header = "# \(day)\n\n"
+        let line1 = "[10:00:00] [mic] Speaker 1: keep first\n"
+        let line2 = "[10:30:00] [mic] Speaker 1: drop middle\n"
+        let line3 = "[11:00:00] [mic] Speaker 1: keep last\n"
+        try (header + line1 + line2 + line3).write(to: url, atomically: true, encoding: .utf8)
+
+        var components = DateComponents()
+        components.year = 2026; components.month = 6; components.day = 13
+        components.hour = 10; components.minute = 30; components.second = 0
+        let middleStart = Calendar.current.date(from: components)!
+
+        try await library.testInsertSegment(
+            date: day,
+            source: "mic",
+            sessionID: "S",
+            startTs: middleStart.timeIntervalSince1970,
+            endTs: middleStart.timeIntervalSince1970 + 1,
+            text: "drop middle"
+        )
+
+        let writer = TranscriptWriter(folder: folder)
+        let outcome = try await library.redactRange(
+            start: middleStart.addingTimeInterval(-1),
+            end: middleStart.addingTimeInterval(1),
+            sources: nil,
+            transcriptFolder: folder,
+            writer: writer
+        )
+        #expect(outcome.segmentsDeleted == 1)
+        #expect(outcome.markdownLinesDeleted == 1)
+        #expect(outcome.daysAffected == [day])
+
+        let rewritten = try String(contentsOf: url, encoding: .utf8)
+        #expect(rewritten.contains("keep first"))
+        #expect(rewritten.contains("keep last"))
+        #expect(!rewritten.contains("drop middle"))
+    }
+
+    @Test
+    func redactRangeDeletesInRangeBookmarks() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        _ = try await library.addBookmark(
+            label: "inside",
+            capturedAt: Date(timeIntervalSince1970: 1000)
+        )
+        _ = try await library.addBookmark(
+            label: "outside",
+            capturedAt: Date(timeIntervalSince1970: 5000)
+        )
+
+        let folder = makeScratchFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let writer = TranscriptWriter(folder: folder)
+
+        let outcome = try await library.redactRange(
+            start: Date(timeIntervalSince1970: 900),
+            end: Date(timeIntervalSince1970: 1100),
+            sources: nil,
+            transcriptFolder: folder,
+            writer: writer
+        )
+        #expect(outcome.bookmarksDeleted == 1)
+
+        let remaining = try await library.listBookmarks()
+        #expect(remaining.count == 1)
+        #expect(remaining.first?.label == "outside")
+    }
+
+    @Test
+    func redactRangeSourceFilterLeavesOtherPipelineIntact() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let speaker = try await library.createUnnamedSpeaker()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let micRecord = SpeakerLibrary.SegmentRecord(
+            speakerID: speaker.speakerID,
+            context: .mic,
+            sessionID: "M",
+            startedAt: now,
+            endedAt: now.addingTimeInterval(2),
+            dateKey: "2026-06-13",
+            text: "mic stays gone",
+            provisional: true
+        )
+        let sysRecord = SpeakerLibrary.SegmentRecord(
+            speakerID: speaker.speakerID,
+            context: .system,
+            sessionID: "S",
+            startedAt: now.addingTimeInterval(1),
+            endedAt: now.addingTimeInterval(3),
+            dateKey: "2026-06-13",
+            text: "system survives",
+            provisional: true
+        )
+        _ = try await library.indexSegment(micRecord)
+        _ = try await library.indexSegment(sysRecord)
+
+        let folder = makeScratchFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let writer = TranscriptWriter(folder: folder)
+
+        let outcome = try await library.redactRange(
+            start: now.addingTimeInterval(-1),
+            end: now.addingTimeInterval(60),
+            sources: [.mic],
+            transcriptFolder: folder,
+            writer: writer
+        )
+        #expect(outcome.segmentsDeleted == 1)
+
+        let allHits = try await library.searchSegments(query: "survives")
+        #expect(allHits.count == 1)
+        let micHits = try await library.searchSegments(query: "stays")
+        #expect(micHits.isEmpty)
+    }
+
+    @Test
+    func redactRangeRejectsInvertedRange() async throws {
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let folder = makeScratchFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let writer = TranscriptWriter(folder: folder)
+        await #expect(throws: SpeakerLibrary.RedactionError.self) {
+            _ = try await library.redactRange(
+                start: Date(timeIntervalSince1970: 1000),
+                end: Date(timeIntervalSince1970: 500),
+                sources: nil,
+                transcriptFolder: folder,
+                writer: writer
+            )
+        }
+    }
+
+    @Test
+    func applyRedactionLeavesUnmatchedLinesUntouched() {
+        let body = """
+        # 2026-06-13
+
+        [10:00:00] [mic] Speaker 1: keep
+        [10:30:00] [mic] Speaker 1: drop
+        paused 10:45:00
+        [11:00:00] [mic] Speaker 1: keep
+        """
+        let drops = [
+            SpeakerLibrary.RedactionLine(time: "10:30:00", source: "mic", text: "drop")
+        ]
+        let (rewritten, count) = SpeakerLibrary.applyRedaction(source: body, drops: drops)
+        #expect(count == 1)
+        #expect(rewritten.contains("# 2026-06-13"))
+        #expect(rewritten.contains("keep"))
+        #expect(!rewritten.contains("drop"))
+        #expect(rewritten.contains("paused 10:45:00"))
+    }
+
+    private func makeScratchFolder() -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("EarShotRedactionTests-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+}
+
 /// Backdoor used by the backfill tests. Real callers go through
 /// `SpeakerLibrary.indexSegment` from the merge layer's forwarder.
 extension SpeakerLibrary {

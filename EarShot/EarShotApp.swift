@@ -18,7 +18,8 @@ struct EarShotApp: App {
                 onTogglePause: { appDelegate.togglePause() },
                 onDumpSpeakers: { appDelegate.showSpeakerLibraryDump() },
                 onOpenSpeakerLibrary: { appDelegate.showSpeakerLibraryWindow() },
-                onOpenTranscriptSearch: { appDelegate.showTranscriptSearchWindow() }
+                onOpenTranscriptSearch: { appDelegate.showTranscriptSearchWindow() },
+                onOpenTimeline: { appDelegate.showTimelineWindow() }
             )
         } label: {
             Image(systemName: appDelegate.appState.status.systemImageName)

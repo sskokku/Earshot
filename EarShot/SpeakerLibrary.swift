@@ -1870,6 +1870,444 @@ actor SpeakerLibrary {
         )
     }
 
+    // MARK: - Timeline (day-scoped sessions + bookmarks)
+
+    /// Sessions intersecting a single day key plus every bookmark whose
+    /// capture moment falls inside that day. The timeline window calls
+    /// this once per visible day. Sessions that straddle midnight are
+    /// returned for every day they touch — the timeline view clips them
+    /// to the visible day.
+    struct DayTimeline: Sendable, Equatable {
+        let dateKey: String
+        let dayStart: Date
+        let dayEnd: Date
+        let sessions: [Session]
+        let bookmarks: [Bookmark]
+    }
+
+    /// Wraps the SQL needed by the timeline window. Day boundaries are
+    /// derived in local time so the on-disk Markdown's day key (also
+    /// local-time, via TranscriptWriter) and the timeline agree.
+    func timelineForDay(_ dateKey: String) throws -> DayTimeline {
+        guard let dayStart = SpeakerLibrary.dayKeyFormatter.date(from: dateKey) else {
+            throw RedactionError.invalidDayKey
+        }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else {
+            throw RedactionError.invalidDayKey
+        }
+        let s = dayStart.timeIntervalSince1970
+        let e = dayEnd.timeIntervalSince1970
+
+        return try dbQueue.read { db in
+            let sessionRows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT id, type, source, label, started_at, ended_at
+                    FROM sessions
+                    WHERE started_at < ?
+                      AND (ended_at IS NULL OR ended_at > ?)
+                    ORDER BY started_at ASC
+                    """,
+                arguments: [e, s]
+            )
+            let sessions = sessionRows.compactMap(Self.session(from:))
+
+            let bookmarkRows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT id, session_id, label, captured_at
+                    FROM bookmarks
+                    WHERE captured_at >= ? AND captured_at < ?
+                    ORDER BY captured_at ASC
+                    """,
+                arguments: [s, e]
+            )
+            let bookmarks = bookmarkRows.compactMap(Self.bookmark(from:))
+
+            return DayTimeline(
+                dateKey: dateKey,
+                dayStart: dayStart,
+                dayEnd: dayEnd,
+                sessions: sessions,
+                bookmarks: bookmarks
+            )
+        }
+    }
+
+    /// Date keys (YYYY-MM-DD) that have either a session row or a bookmark
+    /// row. Used by the timeline window to populate the date picker's
+    /// "go to earliest" button without scanning every day on disk. Local
+    /// midnight bucket per row.
+    func datesWithTimelineActivity() throws -> [String] {
+        try dbQueue.read { db in
+            var keys = Set<String>()
+            let sessionStarts = try Double.fetchAll(
+                db, sql: "SELECT started_at FROM sessions"
+            )
+            for ts in sessionStarts {
+                keys.insert(SpeakerLibrary.dayKeyFormatter.string(from: Date(timeIntervalSince1970: ts)))
+            }
+            let bookmarkStamps = try Double.fetchAll(
+                db, sql: "SELECT captured_at FROM bookmarks"
+            )
+            for ts in bookmarkStamps {
+                keys.insert(SpeakerLibrary.dayKeyFormatter.string(from: Date(timeIntervalSince1970: ts)))
+            }
+            return keys.sorted()
+        }
+    }
+
+    /// Look up the first segment whose start is inside `[start, end]` for
+    /// the given source pipeline. Returned as a `Focus` triplet the
+    /// `TranscriptReaderModel` can match. The timeline window calls this
+    /// when the user clicks a session block so the reader opens scrolled
+    /// to that session's first utterance.
+    struct FirstSegmentFocus: Sendable, Equatable {
+        let dateKey: String
+        let time: String
+        let source: String
+        let text: String
+    }
+
+    func firstSegmentFocus(
+        start: Date,
+        end: Date,
+        source: Context
+    ) throws -> FirstSegmentFocus? {
+        try dbQueue.read { db in
+            let row = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT date, start_ts, source, text
+                    FROM segments
+                    WHERE start_ts >= ? AND start_ts <= ? AND source = ?
+                    ORDER BY start_ts ASC
+                    LIMIT 1
+                    """,
+                arguments: [
+                    start.timeIntervalSince1970,
+                    end.timeIntervalSince1970,
+                    source.rawValue
+                ]
+            )
+            guard let row else { return nil }
+            let ts: Double = row["start_ts"]
+            let time = SpeakerLibrary.timeFormatter.string(from: Date(timeIntervalSince1970: ts))
+            return FirstSegmentFocus(
+                dateKey: row["date"] ?? "",
+                time: time,
+                source: row["source"] ?? source.rawValue,
+                text: row["text"] ?? ""
+            )
+        }
+    }
+
+    // MARK: - Curation (redaction)
+
+    /// One curation-preview row. Returned in chronological order so the
+    /// confirmation sheet can render the lines that are about to disappear.
+    struct RedactionPreviewRow: Sendable, Equatable, Identifiable {
+        let id: Int64
+        let dateKey: String
+        let startedAt: Date
+        let source: Context
+        let speakerLabel: String
+        let text: String
+    }
+
+    /// Summary of the curation operation. `daysAffected` lists every
+    /// `YYYY-MM-DD` whose Markdown file was rewritten so the caller can
+    /// reopen any in-flight reader windows.
+    struct RedactionOutcome: Sendable, Equatable {
+        let segmentsDeleted: Int
+        let bookmarksDeleted: Int
+        let markdownLinesDeleted: Int
+        let daysAffected: [String]
+    }
+
+    /// One drop instruction for the file rewriter. Matches a single line
+    /// by its canonical `[HH:MM:SS] [source] LABEL: text` prefix-and-tail.
+    struct RedactionLine: Sendable, Equatable {
+        let time: String
+        let source: String
+        let text: String
+    }
+
+    enum RedactionError: LocalizedError {
+        case invalidRange
+        case invalidDayKey
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidRange: return "Redaction end must be at or after start."
+            case .invalidDayKey: return "Could not parse the supplied day key."
+            }
+        }
+    }
+
+    /// Read-only listing of every segment that `redactRange` would remove
+    /// given the same arguments. Used by the redaction sheet to show a
+    /// preview count and the lines themselves before the user confirms.
+    func previewRedaction(
+        start: Date,
+        end: Date,
+        sources: Set<Context>? = nil,
+        limit: Int = 500
+    ) throws -> [RedactionPreviewRow] {
+        guard start <= end else { throw RedactionError.invalidRange }
+        return try dbQueue.read { db in
+            var where_: [String] = ["s.start_ts >= ?", "s.start_ts <= ?"]
+            var args: [(any DatabaseValueConvertible)?] = [
+                start.timeIntervalSince1970,
+                end.timeIntervalSince1970
+            ]
+            if let sources, !sources.isEmpty {
+                let placeholders = Array(repeating: "?", count: sources.count).joined(separator: ",")
+                where_.append("s.source IN (\(placeholders))")
+                for src in sources.sorted(by: { $0.rawValue < $1.rawValue }) {
+                    args.append(src.rawValue)
+                }
+            }
+            args.append(limit)
+            let sql = """
+                SELECT s.id AS id,
+                       s.date AS date,
+                       s.start_ts AS start_ts,
+                       s.source AS source,
+                       s.text AS text,
+                       COALESCE(sp.name, sp.display_label, 'Speaker ?') AS label
+                FROM segments s
+                LEFT JOIN speakers sp ON sp.id = s.speaker_id
+                WHERE \(where_.joined(separator: " AND "))
+                ORDER BY s.start_ts ASC
+                LIMIT ?
+                """
+            let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+            return rows.map { row in
+                let ts: Double = row["start_ts"]
+                let srcStr: String = row["source"] ?? "mic"
+                return RedactionPreviewRow(
+                    id: row["id"],
+                    dateKey: row["date"] ?? "",
+                    startedAt: Date(timeIntervalSince1970: ts),
+                    source: Context(rawValue: srcStr) ?? .mic,
+                    speakerLabel: row["label"] ?? "Speaker ?",
+                    text: row["text"] ?? ""
+                )
+            }
+        }
+    }
+
+    /// Count of bookmarks that fall inside the redaction window so the
+    /// preview UI can warn that they will be removed too.
+    func previewBookmarkRedactionCount(start: Date, end: Date) throws -> Int {
+        try dbQueue.read { db in
+            try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT COUNT(*) FROM bookmarks
+                    WHERE captured_at >= ? AND captured_at <= ?
+                    """,
+                arguments: [start.timeIntervalSince1970, end.timeIntervalSince1970]
+            ) ?? 0
+        }
+    }
+
+    /// Permanently scrub everything inside `[start, end]`:
+    ///
+    /// 1. Every Markdown line whose `[HH:MM:SS] [source] LABEL: text`
+    ///    matches an in-range segment is dropped from the day's `.md`.
+    /// 2. The corresponding `segments` rows are DELETEd — the
+    ///    `segments_fts` virtual table's GRDB-installed triggers cascade
+    ///    the delete to FTS5 inside the same write, so no orphaned search
+    ///    hits survive (CLAUDE.md rule 4 + curation requirement).
+    /// 3. Bookmarks captured inside the same window are deleted too — a
+    ///    bookmark referring to redacted content shouldn't outlive its
+    ///    referent.
+    ///
+    /// The file rewrite (`FileManager.replaceItemAt`) runs inside the
+    /// same `dbQueue.write { … }` as the SQL DELETEs, so if either side
+    /// throws the whole operation rolls back. `writer.pauseForRelabel()`
+    /// is called first so the day's open append handle releases before
+    /// the swap. Sessions rows are intentionally left alone: a redacted
+    /// session still happened — the user can drop a fresh range if they
+    /// want the bounding metadata gone too.
+    ///
+    /// Optional `sources` narrows the delete (e.g. "redact mic but leave
+    /// system audio segments") so the timeline's per-block redact path
+    /// can target just one pipeline.
+    func redactRange(
+        start: Date,
+        end: Date,
+        sources: Set<Context>? = nil,
+        transcriptFolder: URL,
+        writer: TranscriptWriter
+    ) async throws -> RedactionOutcome {
+        guard start <= end else { throw RedactionError.invalidRange }
+        let startTs = start.timeIntervalSince1970
+        let endTs = end.timeIntervalSince1970
+
+        // 1. Pull in-range segments so we know which Markdown lines to
+        // drop on each affected day.
+        struct DropRow: Sendable {
+            let dateKey: String
+            let time: String
+            let source: String
+            let text: String
+        }
+        let drops: [DropRow] = try await dbQueue.read { db in
+            var sql = """
+                SELECT date, start_ts, source, text
+                FROM segments
+                WHERE start_ts >= ? AND start_ts <= ?
+                """
+            var args: [(any DatabaseValueConvertible)?] = [startTs, endTs]
+            if let sources, !sources.isEmpty {
+                let placeholders = Array(repeating: "?", count: sources.count).joined(separator: ",")
+                sql += " AND source IN (\(placeholders))"
+                for src in sources.sorted(by: { $0.rawValue < $1.rawValue }) {
+                    args.append(src.rawValue)
+                }
+            }
+            sql += " ORDER BY start_ts ASC"
+            let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+            return rows.map { row in
+                let ts: Double = row["start_ts"]
+                let time = SpeakerLibrary.timeFormatter.string(from: Date(timeIntervalSince1970: ts))
+                return DropRow(
+                    dateKey: row["date"] ?? "",
+                    time: time,
+                    source: row["source"] ?? "mic",
+                    text: row["text"] ?? ""
+                )
+            }
+        }
+
+        // 2. Stage rewritten Markdown for every affected day.
+        let grouped = Dictionary(grouping: drops, by: \.dateKey)
+        await writer.pauseForRelabel()
+
+        var stagedRewrites: [(target: URL, temp: URL)] = []
+        var totalLinesDropped = 0
+
+        do {
+            for (dateKey, dayDrops) in grouped {
+                guard !dateKey.isEmpty else { continue }
+                let target = transcriptFolder.appendingPathComponent("\(dateKey).md", isDirectory: false)
+                guard FileManager.default.fileExists(atPath: target.path) else { continue }
+                let tempURL = transcriptFolder.appendingPathComponent("\(dateKey).md.redact.tmp", isDirectory: false)
+                let original = try String(contentsOf: target, encoding: .utf8)
+                let dropLines = dayDrops.map {
+                    RedactionLine(time: $0.time, source: $0.source, text: $0.text)
+                }
+                let (rewritten, droppedCount) = SpeakerLibrary.applyRedaction(
+                    source: original,
+                    drops: dropLines
+                )
+                totalLinesDropped += droppedCount
+                try rewritten.write(to: tempURL, atomically: false, encoding: .utf8)
+                stagedRewrites.append((target: target, temp: tempURL))
+            }
+        } catch {
+            for entry in stagedRewrites {
+                try? FileManager.default.removeItem(at: entry.temp)
+            }
+            throw error
+        }
+
+        // 3. One transaction: SQL DELETEs (FTS5 cascades via GRDB
+        // sync triggers) + file swaps. If anything throws, every staged
+        // rewrite is removed below and the DB rolls back to pre-state.
+        let rewrites = stagedRewrites
+        var segmentDeleteCount = 0
+        var bookmarkDeleteCount = 0
+        let filterSources = sources
+
+        do {
+            try await dbQueue.write { db in
+                var sql = "DELETE FROM segments WHERE start_ts >= ? AND start_ts <= ?"
+                var args: [(any DatabaseValueConvertible)?] = [startTs, endTs]
+                if let filterSources, !filterSources.isEmpty {
+                    let placeholders = Array(repeating: "?", count: filterSources.count).joined(separator: ",")
+                    sql += " AND source IN (\(placeholders))"
+                    for src in filterSources.sorted(by: { $0.rawValue < $1.rawValue }) {
+                        args.append(src.rawValue)
+                    }
+                }
+                try db.execute(sql: sql, arguments: StatementArguments(args))
+                segmentDeleteCount = db.changesCount
+
+                try db.execute(
+                    sql: """
+                        DELETE FROM bookmarks
+                        WHERE captured_at >= ? AND captured_at <= ?
+                        """,
+                    arguments: [startTs, endTs]
+                )
+                bookmarkDeleteCount = db.changesCount
+
+                for entry in rewrites {
+                    _ = try FileManager.default.replaceItemAt(entry.target, withItemAt: entry.temp)
+                }
+            }
+        } catch {
+            for entry in stagedRewrites {
+                try? FileManager.default.removeItem(at: entry.temp)
+            }
+            throw error
+        }
+
+        return RedactionOutcome(
+            segmentsDeleted: segmentDeleteCount,
+            bookmarksDeleted: bookmarkDeleteCount,
+            markdownLinesDeleted: totalLinesDropped,
+            daysAffected: grouped.keys.sorted()
+        )
+    }
+
+    /// Strip lines whose `(time, source, text)` triplet matches one of the
+    /// drops. Headers / pause-resume / gap markers / summary blocks are
+    /// preserved because `parseTranscriptLine` returns nil for them.
+    /// Returns the rewritten body and the count of lines actually dropped.
+    nonisolated static func applyRedaction(
+        source: String,
+        drops: [RedactionLine]
+    ) -> (String, Int) {
+        struct Key: Hashable { let time: String; let source: String; let text: String }
+        var lookup: Set<Key> = []
+        for d in drops {
+            lookup.insert(Key(time: d.time, source: d.source, text: d.text))
+        }
+        let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var dropped = 0
+        var out: [String] = []
+        out.reserveCapacity(lines.count)
+        for line in lines {
+            if let parsed = parseTranscriptLine(line) {
+                let key = Key(time: parsed.time, source: parsed.source, text: parsed.text)
+                if lookup.contains(key) {
+                    dropped += 1
+                    continue
+                }
+            }
+            out.append(line)
+        }
+        return (out.joined(separator: "\n"), dropped)
+    }
+
+    /// `yyyy-MM-dd` parser mirroring TranscriptWriter's writer-side
+    /// formatter. Used by `timelineForDay` to anchor the requested day
+    /// in the same local-time bucket the on-disk file uses.
+    nonisolated static let dayKeyFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
     // MARK: - S4 errors
 
     enum SpeakerLibraryError: LocalizedError {
