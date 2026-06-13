@@ -1,0 +1,694 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		E6DFF8012FDB760E00AA0B7B /* CLAUDE.md in Resources */ = {isa = PBXBuildFile; fileRef = E6DFF7FF2FDB760E00AA0B7B /* CLAUDE.md */; };
+		E6DFF8022FDB760E00AA0B7B /* BUILD_PLAN.md in Resources */ = {isa = PBXBuildFile; fileRef = E6DFF7FE2FDB760E00AA0B7B /* BUILD_PLAN.md */; };
+		E6DFF8032FDB760E00AA0B7B /* PRD.md in Resources */ = {isa = PBXBuildFile; fileRef = E6DFF8002FDB760E00AA0B7B /* PRD.md */; };
+		E6DFF8242FDB81F500AA0B7B /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = E6DFF8232FDB81F500AA0B7B /* FluidAudio */; };
+		E6DFF8482FDCF60300AA0B7B /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = E6DFF8472FDCF60300AA0B7B /* GRDB */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		E6DFF7E22FDB75CA00AA0B7B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = E6DFF7CA2FDB75C900AA0B7B /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E6DFF7D12FDB75C900AA0B7B;
+			remoteInfo = EarShot;
+		};
+		E6DFF7EC2FDB75CA00AA0B7B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = E6DFF7CA2FDB75C900AA0B7B /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E6DFF7D12FDB75C900AA0B7B;
+			remoteInfo = EarShot;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		E6DFF7D22FDB75C900AA0B7B /* EarShot.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = EarShot.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E6DFF7E12FDB75CA00AA0B7B /* EarShotTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EarShotTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		E6DFF7EB2FDB75CA00AA0B7B /* EarShotUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EarShotUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		E6DFF7FE2FDB760E00AA0B7B /* BUILD_PLAN.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = BUILD_PLAN.md; sourceTree = "<group>"; };
+		E6DFF7FF2FDB760E00AA0B7B /* CLAUDE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = CLAUDE.md; sourceTree = "<group>"; };
+		E6DFF8002FDB760E00AA0B7B /* PRD.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = PRD.md; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		E6DFF83F2FDCD62900AA0B7B /* Exceptions for "EarShot" folder in "EarShot" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = E6DFF7D12FDB75C900AA0B7B /* EarShot */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		E6DFF7D42FDB75C900AA0B7B /* EarShot */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				E6DFF83F2FDCD62900AA0B7B /* Exceptions for "EarShot" folder in "EarShot" target */,
+			);
+			path = EarShot;
+			sourceTree = "<group>";
+		};
+		E6DFF7E42FDB75CA00AA0B7B /* EarShotTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = EarShotTests;
+			sourceTree = "<group>";
+		};
+		E6DFF7EE2FDB75CA00AA0B7B /* EarShotUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = EarShotUITests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		E6DFF7CF2FDB75C900AA0B7B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E6DFF8242FDB81F500AA0B7B /* FluidAudio in Frameworks */,
+				E6DFF8482FDCF60300AA0B7B /* GRDB in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E6DFF7DE2FDB75CA00AA0B7B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E6DFF7E82FDB75CA00AA0B7B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		E6DFF7C92FDB75C900AA0B7B = {
+			isa = PBXGroup;
+			children = (
+				E6DFF7FE2FDB760E00AA0B7B /* BUILD_PLAN.md */,
+				E6DFF7FF2FDB760E00AA0B7B /* CLAUDE.md */,
+				E6DFF8002FDB760E00AA0B7B /* PRD.md */,
+				E6DFF7D42FDB75C900AA0B7B /* EarShot */,
+				E6DFF7E42FDB75CA00AA0B7B /* EarShotTests */,
+				E6DFF7EE2FDB75CA00AA0B7B /* EarShotUITests */,
+				E6DFF8222FDB81F500AA0B7B /* Frameworks */,
+				E6DFF7D32FDB75C900AA0B7B /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		E6DFF7D32FDB75C900AA0B7B /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				E6DFF7D22FDB75C900AA0B7B /* EarShot.app */,
+				E6DFF7E12FDB75CA00AA0B7B /* EarShotTests.xctest */,
+				E6DFF7EB2FDB75CA00AA0B7B /* EarShotUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		E6DFF8222FDB81F500AA0B7B /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		E6DFF7D12FDB75C900AA0B7B /* EarShot */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E6DFF7F52FDB75CA00AA0B7B /* Build configuration list for PBXNativeTarget "EarShot" */;
+			buildPhases = (
+				E6DFF7CE2FDB75C900AA0B7B /* Sources */,
+				E6DFF7CF2FDB75C900AA0B7B /* Frameworks */,
+				E6DFF7D02FDB75C900AA0B7B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				E6DFF7D42FDB75C900AA0B7B /* EarShot */,
+			);
+			name = EarShot;
+			packageProductDependencies = (
+				E6DFF8232FDB81F500AA0B7B /* FluidAudio */,
+				E6DFF8472FDCF60300AA0B7B /* GRDB */,
+			);
+			productName = EarShot;
+			productReference = E6DFF7D22FDB75C900AA0B7B /* EarShot.app */;
+			productType = "com.apple.product-type.application";
+		};
+		E6DFF7E02FDB75CA00AA0B7B /* EarShotTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E6DFF7F82FDB75CA00AA0B7B /* Build configuration list for PBXNativeTarget "EarShotTests" */;
+			buildPhases = (
+				E6DFF7DD2FDB75CA00AA0B7B /* Sources */,
+				E6DFF7DE2FDB75CA00AA0B7B /* Frameworks */,
+				E6DFF7DF2FDB75CA00AA0B7B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E6DFF7E32FDB75CA00AA0B7B /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				E6DFF7E42FDB75CA00AA0B7B /* EarShotTests */,
+			);
+			name = EarShotTests;
+			packageProductDependencies = (
+			);
+			productName = EarShotTests;
+			productReference = E6DFF7E12FDB75CA00AA0B7B /* EarShotTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		E6DFF7EA2FDB75CA00AA0B7B /* EarShotUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E6DFF7FB2FDB75CA00AA0B7B /* Build configuration list for PBXNativeTarget "EarShotUITests" */;
+			buildPhases = (
+				E6DFF7E72FDB75CA00AA0B7B /* Sources */,
+				E6DFF7E82FDB75CA00AA0B7B /* Frameworks */,
+				E6DFF7E92FDB75CA00AA0B7B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E6DFF7ED2FDB75CA00AA0B7B /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				E6DFF7EE2FDB75CA00AA0B7B /* EarShotUITests */,
+			);
+			name = EarShotUITests;
+			packageProductDependencies = (
+			);
+			productName = EarShotUITests;
+			productReference = E6DFF7EB2FDB75CA00AA0B7B /* EarShotUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		E6DFF7CA2FDB75C900AA0B7B /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2650;
+				LastUpgradeCheck = 2650;
+				TargetAttributes = {
+					E6DFF7D12FDB75C900AA0B7B = {
+						CreatedOnToolsVersion = 26.5;
+					};
+					E6DFF7E02FDB75CA00AA0B7B = {
+						CreatedOnToolsVersion = 26.5;
+						TestTargetID = E6DFF7D12FDB75C900AA0B7B;
+					};
+					E6DFF7EA2FDB75CA00AA0B7B = {
+						CreatedOnToolsVersion = 26.5;
+						TestTargetID = E6DFF7D12FDB75C900AA0B7B;
+					};
+				};
+			};
+			buildConfigurationList = E6DFF7CD2FDB75C900AA0B7B /* Build configuration list for PBXProject "EarShot" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = E6DFF7C92FDB75C900AA0B7B;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				E6DFF8102FDB7D4300AA0B7B /* XCRemoteSwiftPackageReference "FluidAudio" */,
+				E6DFF8462FDCF60300AA0B7B /* XCRemoteSwiftPackageReference "GRDB.swift" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = E6DFF7D32FDB75C900AA0B7B /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				E6DFF7D12FDB75C900AA0B7B /* EarShot */,
+				E6DFF7E02FDB75CA00AA0B7B /* EarShotTests */,
+				E6DFF7EA2FDB75CA00AA0B7B /* EarShotUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		E6DFF7D02FDB75C900AA0B7B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E6DFF8012FDB760E00AA0B7B /* CLAUDE.md in Resources */,
+				E6DFF8022FDB760E00AA0B7B /* BUILD_PLAN.md in Resources */,
+				E6DFF8032FDB760E00AA0B7B /* PRD.md in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E6DFF7DF2FDB75CA00AA0B7B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E6DFF7E92FDB75CA00AA0B7B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		E6DFF7CE2FDB75C900AA0B7B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E6DFF7DD2FDB75CA00AA0B7B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E6DFF7E72FDB75CA00AA0B7B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		E6DFF7E32FDB75CA00AA0B7B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E6DFF7D12FDB75C900AA0B7B /* EarShot */;
+			targetProxy = E6DFF7E22FDB75CA00AA0B7B /* PBXContainerItemProxy */;
+		};
+		E6DFF7ED2FDB75CA00AA0B7B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E6DFF7D12FDB75C900AA0B7B /* EarShot */;
+			targetProxy = E6DFF7EC2FDB75CA00AA0B7B /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		E6DFF7F32FDB75CA00AA0B7B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = KJ47YGNM8Z;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Earshot listens through the microphone to transcribe what you and people around you say. Audio never leaves the mac.";
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		E6DFF7F42FDB75CA00AA0B7B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = KJ47YGNM8Z;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Earshot listens through the microphone to transcribe what you and people around you say. Audio never leaves the mac.";
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		E6DFF7F62FDB75CA00AA0B7B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = EarShot/EarShot.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KJ47YGNM8Z;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SELECTED_FILES = readwrite;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = EarShot/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "";
+				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSAudioCaptureUsageDescription = "Earshot taps audio from meeting apps you allow (Teams, Zoom) so it can transcribe what the other side says. Audio never leaves the mac.";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Earshot listens through the microphone to transcribe what you and people around you say. Audio never leaves the mac.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
+				MARKETING_VERSION = 1.0;
+				NEW_SETTING = "";
+				PRODUCT_BUNDLE_IDENTIFIER = com.earshot.EarShot;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		E6DFF7F72FDB75CA00AA0B7B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = EarShot/EarShot.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KJ47YGNM8Z;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SELECTED_FILES = readwrite;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = EarShot/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "";
+				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSAudioCaptureUsageDescription = "Earshot taps audio from meeting apps you allow (Teams, Zoom) so it can transcribe what the other side says. Audio never leaves the mac.";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Earshot listens through the microphone to transcribe what you and people around you say. Audio never leaves the mac.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
+				MARKETING_VERSION = 1.0;
+				NEW_SETTING = "";
+				PRODUCT_BUNDLE_IDENTIFIER = com.earshot.EarShot;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		E6DFF7F92FDB75CA00AA0B7B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KJ47YGNM8Z;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.earshot.EarShotTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/EarShot.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/EarShot";
+			};
+			name = Debug;
+		};
+		E6DFF7FA2FDB75CA00AA0B7B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KJ47YGNM8Z;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.earshot.EarShotTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/EarShot.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/EarShot";
+			};
+			name = Release;
+		};
+		E6DFF7FC2FDB75CA00AA0B7B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KJ47YGNM8Z;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.earshot.EarShotUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = EarShot;
+			};
+			name = Debug;
+		};
+		E6DFF7FD2FDB75CA00AA0B7B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KJ47YGNM8Z;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.earshot.EarShotUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = EarShot;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		E6DFF7CD2FDB75C900AA0B7B /* Build configuration list for PBXProject "EarShot" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E6DFF7F32FDB75CA00AA0B7B /* Debug */,
+				E6DFF7F42FDB75CA00AA0B7B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E6DFF7F52FDB75CA00AA0B7B /* Build configuration list for PBXNativeTarget "EarShot" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E6DFF7F62FDB75CA00AA0B7B /* Debug */,
+				E6DFF7F72FDB75CA00AA0B7B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E6DFF7F82FDB75CA00AA0B7B /* Build configuration list for PBXNativeTarget "EarShotTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E6DFF7F92FDB75CA00AA0B7B /* Debug */,
+				E6DFF7FA2FDB75CA00AA0B7B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E6DFF7FB2FDB75CA00AA0B7B /* Build configuration list for PBXNativeTarget "EarShotUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E6DFF7FC2FDB75CA00AA0B7B /* Debug */,
+				E6DFF7FD2FDB75CA00AA0B7B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		E6DFF8102FDB7D4300AA0B7B /* XCRemoteSwiftPackageReference "FluidAudio" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/FluidInference/FluidAudio.git";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
+		E6DFF8462FDCF60300AA0B7B /* XCRemoteSwiftPackageReference "GRDB.swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/groue/GRDB.swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 7.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		E6DFF8232FDB81F500AA0B7B /* FluidAudio */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E6DFF8102FDB7D4300AA0B7B /* XCRemoteSwiftPackageReference "FluidAudio" */;
+			productName = FluidAudio;
+		};
+		E6DFF8472FDCF60300AA0B7B /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E6DFF8462FDCF60300AA0B7B /* XCRemoteSwiftPackageReference "GRDB.swift" */;
+			productName = GRDB;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = E6DFF7CA2FDB75C900AA0B7B /* Project object */;
+}
