@@ -59,3 +59,6 @@ Exit test: 10-hour soak passes with stable memory and zero lost segments across 
 - AI chat / summaries over transcripts. Gate: only build if S4's search logs show frequent lookups after two weeks of real use.
 - Daily digest generation.
 - Retention auto-pruning beyond the simple rolling-window setting.
+
+## Out-of-band features (post-v1, shipped)
+- [x] **Cross-transcript search window** — dedicated NSWindow (Cmd+F) over every session ever recorded via the existing S4 FTS5 index. Filters: date range (with one-click presets), speaker, source. Result clicks open the day's Markdown in an in-app `TranscriptReaderWindow` scrolled to the matched segment with a yellow highlight. Supersedes the S4 panel-embedded search strip; the floating panel's magnifying-glass button now launches the window. Fully local (rule 9), read-only reader so today's writer stays the sole owner of today's file (rule 4). See PROGRESS.md → "Cross-transcript search window".

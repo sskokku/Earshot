@@ -57,7 +57,7 @@ final class TranscriptPanelController {
     /// before that happens is a no-op rather than a crash.
     private static let noopActions = PanelActions(
         renameSpeaker: { _ in },
-        runSearch: { _ in [] },
+        openTranscriptSearch: { },
         openSpeakerLibrary: { }
     )
 }

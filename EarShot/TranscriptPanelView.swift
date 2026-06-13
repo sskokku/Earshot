@@ -15,9 +15,11 @@ struct PanelActions {
     /// resolves the speakerID + current display label and runs the
     /// transactional rename via SpeakerLibrary.
     var renameSpeaker: (LiveTranscript.Segment) -> Void
-    /// Run an FTS5 search and log it. Returns hits via the panel's
-    /// search state.
-    var runSearch: (String) async -> [SpeakerLibrary.SearchHit]
+    /// Open the cross-transcript search window. The panel-embedded search
+    /// strip from S4 is gone; the magnifying-glass button now launches a
+    /// full window with date / speaker / source filters and click-to-open
+    /// reader navigation.
+    var openTranscriptSearch: () -> Void
     /// Open the speaker library window.
     var openSpeakerLibrary: () -> Void
 }
@@ -25,11 +27,6 @@ struct PanelActions {
 struct TranscriptPanelView: View {
     @Bindable var appState: AppState
     let actions: PanelActions
-
-    @State private var isSearchOpen: Bool = false
-    @State private var searchQuery: String = ""
-    @State private var searchResults: [SpeakerLibrary.SearchHit] = []
-    @State private var searchInFlight: Bool = false
 
     private static let timestampFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -43,12 +40,6 @@ struct TranscriptPanelView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
                 .chromeSurface(cornerRadius: 10)
-
-            if isSearchOpen {
-                searchSection
-                    .padding(10)
-                    .chromeSurface(cornerRadius: 10)
-            }
 
             ScrollViewReader { proxy in
                 ScrollView {
@@ -154,84 +145,6 @@ struct TranscriptPanelView: View {
         return "Rename \"\(label)\"…"
     }
 
-    @ViewBuilder
-    private var searchSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("Search transcripts", text: $searchQuery)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { runSearch() }
-                Button("Search") { runSearch() }
-                    .disabled(searchQuery.trimmingCharacters(in: .whitespaces).isEmpty || searchInFlight)
-                Button(action: { closeSearch() }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-            if searchInFlight {
-                ProgressView().controlSize(.small)
-            } else if !searchResults.isEmpty {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 6) {
-                        ForEach(searchResults) { hit in
-                            searchResultRow(hit)
-                        }
-                    }
-                }
-                .frame(maxHeight: 220)
-            } else if !searchQuery.isEmpty {
-                Text("No matches")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func searchResultRow(_ hit: SpeakerLibrary.SearchHit) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 6) {
-                Text(hit.dateKey)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.tertiary)
-                Text(Self.timestampFormatter.string(from: hit.startedAt))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-                Text("[\(hit.source.rawValue)]")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                Text(hit.speakerLabel)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-            Text(hit.text)
-                .font(.callout)
-                .textSelection(.enabled)
-        }
-    }
-
-    private func runSearch() {
-        let q = searchQuery.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty, !searchInFlight else { return }
-        searchInFlight = true
-        Task {
-            let hits = await actions.runSearch(q)
-            await MainActor.run {
-                searchResults = hits
-                searchInFlight = false
-            }
-        }
-    }
-
-    private func closeSearch() {
-        isSearchOpen = false
-        searchQuery = ""
-        searchResults = []
-    }
-
     private var provisionalRow: some View {
         Text(appState.transcript.provisional)
             .font(.body)
@@ -253,19 +166,11 @@ struct TranscriptPanelView: View {
             }
             .buttonStyle(.borderless)
             .help("Speakers")
-            Button(action: toggleSearch) {
-                Image(systemName: isSearchOpen ? "magnifyingglass.circle.fill" : "magnifyingglass")
+            Button(action: { actions.openTranscriptSearch() }) {
+                Image(systemName: "magnifyingglass")
             }
             .buttonStyle(.borderless)
             .help("Search transcripts")
-        }
-    }
-
-    private func toggleSearch() {
-        if isSearchOpen {
-            closeSearch()
-        } else {
-            isSearchOpen = true
         }
     }
 

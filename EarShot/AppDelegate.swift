@@ -66,6 +66,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var speakerLibraryWindowModel: SpeakerLibraryWindowModel?
     private var speakerLibraryWindowController: SpeakerLibraryWindowController?
 
+    /// Cross-transcript search window. Replaces the S4 panel-embedded
+    /// search strip; queries the same FTS5 index but adds date / speaker /
+    /// source filters and click-to-open-reader navigation.
+    private var transcriptSearchModel: TranscriptSearchModel?
+    private var transcriptSearchController: TranscriptSearchWindowController?
+
+    /// In-app reader the search window opens when the user clicks a hit.
+    /// Singleton so we don't accumulate one window per click.
+    private let transcriptReaderController = TranscriptReaderWindowController()
+
     /// S4 — recorder + downloader reused by the speaker window's
     /// "Re-enroll Me" flow. Lazy so they only initialize when needed.
     private let enrollmentRecorder = EnrollmentRecorder()
@@ -386,6 +396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // actions so the inline naming + search affordances in the
             // floating panel are live.
             setupSpeakerLibraryWindow(library: library, resolver: resolver)
+            setupTranscriptSearchWindow(library: library)
             wirePanelActions(library: library)
 
             let pipeline = MicPipeline(asr: asrManager, vad: vad)
@@ -755,15 +766,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 self.beginRenameSheet(for: segment)
             },
-            runSearch: { [weak self, library] query in
-                guard let self else { return [] }
-                return await self.performSearch(query: query, library: library)
+            openTranscriptSearch: { [weak self] in
+                self?.showTranscriptSearchWindow()
             },
             openSpeakerLibrary: { [weak self] in
                 self?.showSpeakerLibraryWindow()
             }
         )
         panelController.setActions(actions)
+    }
+
+    // MARK: - Cross-transcript search
+
+    private func setupTranscriptSearchWindow(library: SpeakerLibrary) {
+        let model = TranscriptSearchModel(library: library, metrics: metrics)
+        model.onOpenHit = { [weak self] hit in
+            self?.openTranscriptReader(for: hit)
+        }
+        self.transcriptSearchModel = model
+        self.transcriptSearchController = TranscriptSearchWindowController(model: model)
+    }
+
+    func showTranscriptSearchWindow() {
+        if let controller = transcriptSearchController {
+            controller.show()
+        } else {
+            // Library not loaded yet; surface a quiet alert instead of
+            // silently no-op-ing so the user knows search will be live
+            // after onboarding completes.
+            presentSimpleAlert(title: "Search", message: "Search index not ready yet. Finish onboarding and let the mic pipeline boot first.")
+        }
+    }
+
+    /// Open the in-app transcript reader for the hit's date, scrolled to
+    /// the matched line. Same `(time, source, text)` key the relabel
+    /// rewriter uses, so duplicates at the same instant don't cross-target.
+    private func openTranscriptReader(for hit: SpeakerLibrary.SearchHit) {
+        let folder = AppSettings.transcriptsFolder
+        let focus = TranscriptReaderModel.Focus(
+            time: Self.transcriptTimeKey(from: hit.startedAt),
+            source: hit.source.rawValue,
+            text: hit.text
+        )
+        transcriptReaderController.show(
+            transcriptFolder: folder,
+            dateKey: hit.dateKey,
+            focus: focus
+        )
+    }
+
+    /// `HH:mm:ss` formatter mirroring `TranscriptWriter`'s so the reader's
+    /// line-match key agrees with what's on disk.
+    nonisolated private static let timeKeyFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
+    nonisolated static func transcriptTimeKey(from date: Date) -> String {
+        timeKeyFormatter.string(from: date)
     }
 
     /// Inline naming sheet for a transcript row. The segment carries
@@ -822,26 +885,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             await MainActor.run {
                 self.presentSimpleAlert(title: "Rename Failed", message: error.localizedDescription)
             }
-        }
-    }
-
-    /// PRD R8 — log every query locally so the future AI-layer decision
-    /// has usage data behind it. Failures here don't block the result
-    /// list (the user still gets their hits); they only mean we missed
-    /// one log row.
-    private func performSearch(query: String, library: SpeakerLibrary) async -> [SpeakerLibrary.SearchHit] {
-        do {
-            let hits = try await library.searchSegments(query: query)
-            do {
-                try await library.logSearch(query: query, resultCount: hits.count)
-                await metrics.recordSearch()
-            } catch {
-                log.error("Search log write failed: \(error.localizedDescription, privacy: .public)")
-            }
-            return hits
-        } catch {
-            log.error("Search failed: \(error.localizedDescription, privacy: .public)")
-            return []
         }
     }
 

@@ -1224,9 +1224,27 @@ actor SpeakerLibrary {
         let id: Int64
         let dateKey: String
         let startedAt: Date
+        let endedAt: Date
         let source: Context
+        let speakerID: Int64?
         let speakerLabel: String
         let text: String
+    }
+
+    /// Filters for the cross-transcript search window. All fields are
+    /// optional; `nil` (or empty) means "no constraint" so a freshly-opened
+    /// window with no filters set still returns hits from every session
+    /// ever recorded. The segments / FTS5 index is the persistent store
+    /// (one row per finalized segment from either pipeline, written by the
+    /// merge layer's `onForward` since S4), so this is the only query path
+    /// callers need for whole-history search.
+    struct SearchFilters: Sendable, Equatable {
+        var startDate: Date?
+        var endDate: Date?
+        var speakerIDs: [Int64]?
+        var sources: Set<Context>?
+
+        static let none = SearchFilters()
     }
 
     /// Run an FTS5 query against `segments_fts`. The pattern is built with
@@ -1234,33 +1252,99 @@ actor SpeakerLibrary {
     /// text without worrying about FTS5 grammar. Results are sorted by
     /// `bm25` rank (best match first). The hit list is capped at `limit`
     /// to keep the panel snappy.
-    func searchSegments(query: String, limit: Int = 50) throws -> [SearchHit] {
+    ///
+    /// `filters` narrows by wall-clock date range, persistent speaker id,
+    /// and source pipeline (mic/system). An empty `query` with non-empty
+    /// filters returns the most-recent matching segments ordered by
+    /// `start_ts DESC` so the cross-transcript search window can act as a
+    /// browse-by-filter view too.
+    func searchSegments(
+        query: String,
+        filters: SearchFilters = .none,
+        limit: Int = 200
+    ) throws -> [SearchHit] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return [] }
-        guard let pattern = FTS5Pattern(matchingAllTokensIn: trimmed) else { return [] }
+        let usesFts = !trimmed.isEmpty
+        let pattern: FTS5Pattern?
+        if usesFts {
+            guard let p = FTS5Pattern(matchingAllTokensIn: trimmed) else { return [] }
+            pattern = p
+        } else {
+            pattern = nil
+            // Guard against an empty-query, empty-filter call — that would
+            // dump the entire segments table into memory. The window only
+            // sends an empty-query request when at least one filter is set;
+            // enforce here too.
+            let noFilters = filters.startDate == nil
+                && filters.endDate == nil
+                && (filters.speakerIDs?.isEmpty ?? true)
+                && (filters.sources?.isEmpty ?? true)
+            if noFilters { return [] }
+        }
+
         return try dbQueue.read { db in
-            let rows = try Row.fetchAll(db, sql: """
+            var where_: [String] = []
+            var args: [(any DatabaseValueConvertible)?] = []
+            if usesFts, let pattern {
+                where_.append("f.text MATCH ?")
+                args.append(pattern)
+            }
+            if let start = filters.startDate {
+                where_.append("s.start_ts >= ?")
+                args.append(start.timeIntervalSince1970)
+            }
+            if let end = filters.endDate {
+                where_.append("s.start_ts <= ?")
+                args.append(end.timeIntervalSince1970)
+            }
+            if let speakerIDs = filters.speakerIDs, !speakerIDs.isEmpty {
+                let placeholders = Array(repeating: "?", count: speakerIDs.count).joined(separator: ",")
+                where_.append("s.speaker_id IN (\(placeholders))")
+                for id in speakerIDs { args.append(id) }
+            }
+            if let sources = filters.sources, !sources.isEmpty {
+                let placeholders = Array(repeating: "?", count: sources.count).joined(separator: ",")
+                where_.append("s.source IN (\(placeholders))")
+                // Stable order so the placeholder/argument count agrees.
+                for source in sources.sorted(by: { $0.rawValue < $1.rawValue }) {
+                    args.append(source.rawValue)
+                }
+            }
+            args.append(limit)
+
+            let whereClause = where_.isEmpty ? "" : "WHERE " + where_.joined(separator: " AND ")
+            let orderClause = usesFts ? "ORDER BY bm25(segments_fts)" : "ORDER BY s.start_ts DESC"
+            let fromClause = usesFts
+                ? "FROM segments_fts f JOIN segments s ON s.id = f.rowid LEFT JOIN speakers sp ON sp.id = s.speaker_id"
+                : "FROM segments s LEFT JOIN speakers sp ON sp.id = s.speaker_id"
+
+            let sql = """
                 SELECT s.id AS id,
                        s.date AS date,
                        s.start_ts AS start_ts,
+                       s.end_ts AS end_ts,
                        s.source AS source,
+                       s.speaker_id AS speaker_id,
                        s.text AS text,
                        COALESCE(sp.name, sp.display_label, 'Speaker ?') AS label
-                FROM segments_fts f
-                JOIN segments s ON s.id = f.rowid
-                LEFT JOIN speakers sp ON sp.id = s.speaker_id
-                WHERE f.text MATCH ?
-                ORDER BY bm25(segments_fts)
+                \(fromClause)
+                \(whereClause)
+                \(orderClause)
                 LIMIT ?
-                """, arguments: [pattern, limit])
+                """
+
+            let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
             return rows.map { row in
                 let ts: Double = row["start_ts"]
+                let endTs: Double = row["end_ts"] ?? ts
                 let srcStr: String = row["source"] ?? "mic"
                 return SearchHit(
                     id: row["id"],
                     dateKey: row["date"] ?? "",
                     startedAt: Date(timeIntervalSince1970: ts),
+                    endedAt: Date(timeIntervalSince1970: endTs),
                     source: Context(rawValue: srcStr) ?? .mic,
+                    speakerID: row["speaker_id"],
                     speakerLabel: row["label"] ?? "Speaker ?",
                     text: row["text"] ?? ""
                 )
