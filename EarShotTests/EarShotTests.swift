@@ -1987,6 +1987,230 @@ struct RedactionTests {
     }
 }
 
+// MARK: - Speaker curation (needs-naming + merge suggestions)
+
+/// Cover the curation surface on `SpeakerLibrary`: ranked unnamed
+/// speakers, sample quote selection, badge count (excludes owner +
+/// merged + named), and cross-context merge suggestions in the
+/// just-below-threshold band.
+struct SpeakerCurationTests {
+
+    /// `AppSettings.ownerSpeakerIDValue` is UserDefaults-backed and
+    /// persists across the entire xctest run, so a prior suite that
+    /// enrolled an owner leaves a non-nil id behind. The curation queries
+    /// filter by `s.id <> ownerSpeakerIDValue`, so a stale value would
+    /// erroneously exclude one of the speakers a curation test creates.
+    /// Clear it at the top of every test; tests that need an owner
+    /// re-enroll it explicitly below.
+    private static func resetOwnerAppSettings() {
+        AppSettings.ownerSpeakerIDValue = nil
+    }
+
+    @Test
+    func unnamedSpeakerCountExcludesOwnerMergedAndNamed() async throws {
+        Self.resetOwnerAppSettings()
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        // Owner: enrolled with a name → never counted.
+        _ = try await library.enrollOwner(
+            name: "Owner",
+            embedding: IdentityResolverTests.makeDirectionalEmbedding(dim: 256, seed: 1)
+        )
+        // Unnamed speakers — these are the badge.
+        let s1 = try await library.createUnnamedSpeaker()
+        let s2 = try await library.createUnnamedSpeaker()
+        // Named speaker — name set after creation.
+        let named = try await library.createUnnamedSpeaker()
+        try await library.testSetName(speakerID: named.speakerID, name: "Bob")
+        // Merged speaker — survives for audit but is not in the active set.
+        let merged = try await library.createUnnamedSpeaker()
+        try await library.testSetMergedInto(source: merged.speakerID, into: s1.speakerID)
+
+        let count = try await library.unnamedSpeakerCount()
+        #expect(count == 2)
+        let rows = try await library.unnamedSpeakersForCuration()
+        let surfaced = Set(rows.map(\.id))
+        #expect(surfaced == [s1.speakerID, s2.speakerID])
+    }
+
+    @Test
+    func unnamedSpeakersRankedByTotalSegmentFrequency() async throws {
+        Self.resetOwnerAppSettings()
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let busy = try await library.createUnnamedSpeaker()
+        let medium = try await library.createUnnamedSpeaker()
+        let quiet = try await library.createUnnamedSpeaker()
+        // Three segments for busy, two for medium, one for quiet.
+        let date = "2026-06-13"
+        for i in 0..<3 {
+            try await library.testInsertSegment(
+                speakerID: busy.speakerID,
+                date: date,
+                source: "mic",
+                sessionID: "busy",
+                startTs: 1000 + Double(i),
+                endTs: 1001 + Double(i),
+                text: "busy line \(i)"
+            )
+        }
+        for i in 0..<2 {
+            try await library.testInsertSegment(
+                speakerID: medium.speakerID,
+                date: date,
+                source: "mic",
+                sessionID: "medium",
+                startTs: 2000 + Double(i),
+                endTs: 2001 + Double(i),
+                text: "medium line \(i)"
+            )
+        }
+        try await library.testInsertSegment(
+            speakerID: quiet.speakerID,
+            date: date,
+            source: "system",
+            sessionID: "quiet",
+            startTs: 3000,
+            endTs: 3001,
+            text: "quiet line"
+        )
+
+        let rows = try await library.unnamedSpeakersForCuration()
+        #expect(rows.map(\.id) == [busy.speakerID, medium.speakerID, quiet.speakerID])
+        #expect(rows.map(\.segmentCount) == [3, 2, 1])
+    }
+
+    @Test
+    func sampleQuotesPrefersLongestAndMostRecent() async throws {
+        Self.resetOwnerAppSettings()
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let row = try await library.createUnnamedSpeaker()
+        // Three short, two long. Longest two must surface; tie broken by recency.
+        try await library.testInsertSegment(
+            speakerID: row.speakerID, date: "2026-06-13", source: "mic", sessionID: "s",
+            startTs: 100, endTs: 101, text: "short one"
+        )
+        try await library.testInsertSegment(
+            speakerID: row.speakerID, date: "2026-06-13", source: "mic", sessionID: "s",
+            startTs: 200, endTs: 201, text: "this is a much longer utterance with more words"
+        )
+        try await library.testInsertSegment(
+            speakerID: row.speakerID, date: "2026-06-13", source: "system", sessionID: "s",
+            startTs: 300, endTs: 301, text: "another long-ish utterance again"
+        )
+
+        let rows = try await library.unnamedSpeakersForCuration(quotesPerSpeaker: 2)
+        #expect(rows.count == 1)
+        let quotes = rows[0].sampleQuotes
+        #expect(quotes.count == 2)
+        // The longest text is first; the medium-length one is second.
+        #expect(quotes[0].text == "this is a much longer utterance with more words")
+        #expect(quotes[1].text == "another long-ish utterance again")
+    }
+
+    @Test
+    func mergeSuggestionsBandPassesAndRanksDescending() async throws {
+        Self.resetOwnerAppSettings()
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        // Three unnamed speakers. Embeddings constructed so that:
+        //  - A.mic ↔ B.system  sits at cosine ≈ 0.68 (in the band).
+        //  - A.mic ↔ C.system  sits near orthogonal (well below the band).
+        //  - B.mic ↔ C.system  sits at cosine ≈ 1.0 (above the auto-merge
+        //    ceiling — the live resolver would have folded these).
+        let a = try await library.createUnnamedSpeaker()
+        let b = try await library.createUnnamedSpeaker()
+        let c = try await library.createUnnamedSpeaker()
+
+        let vA = IdentityResolverTests.makeDirectionalEmbedding(dim: 256, seed: 41)
+        let vBSystemInBand = SpeakerCurationTests.vectorWithCosine(to: vA, cosine: 0.68)
+        try await library.recordEmbedding(speakerID: a.speakerID, context: .mic, vector: vA, quality: 0.9)
+        try await library.recordEmbedding(speakerID: b.speakerID, context: .system, vector: vBSystemInBand, quality: 0.9)
+
+        // Below-band pair: orthogonal-ish vector on C.system.
+        let vCSystemBelow = SpeakerCurationTests.vectorWithCosine(to: vA, cosine: 0.10)
+        try await library.recordEmbedding(speakerID: c.speakerID, context: .system, vector: vCSystemBelow, quality: 0.9)
+
+        // Above-ceiling pair: identical vectors on B.mic and C.system.
+        let vAbove = IdentityResolverTests.makeDirectionalEmbedding(dim: 256, seed: 71)
+        try await library.recordEmbedding(speakerID: b.speakerID, context: .mic, vector: vAbove, quality: 0.9)
+        try await library.recordEmbedding(speakerID: c.speakerID, context: .system, vector: vAbove, quality: 0.9)
+
+        let suggestions = try await library.mergeSuggestions()
+        let pairs = suggestions.map { Set([$0.speakerA, $0.speakerB]) }
+        // The in-band pair must appear.
+        #expect(pairs.contains(Set([a.speakerID, b.speakerID])))
+        // Above-ceiling pair must NOT (live path would have auto-folded).
+        #expect(!pairs.contains(Set([b.speakerID, c.speakerID])))
+        // Sorted DESC by similarity.
+        let sims = suggestions.map(\.similarity)
+        #expect(sims == sims.sorted(by: >))
+    }
+
+    @Test
+    func mergeSuggestionRecommendsNamedDestination() async throws {
+        Self.resetOwnerAppSettings()
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let unnamed = try await library.createUnnamedSpeaker()
+        let willName = try await library.createUnnamedSpeaker()
+        try await library.testSetName(speakerID: willName.speakerID, name: "Bob")
+
+        let v = IdentityResolverTests.makeDirectionalEmbedding(dim: 256, seed: 91)
+        let vInBand = SpeakerCurationTests.vectorWithCosine(to: v, cosine: 0.68)
+        try await library.recordEmbedding(speakerID: unnamed.speakerID, context: .mic, vector: v, quality: 0.9)
+        try await library.recordEmbedding(speakerID: willName.speakerID, context: .system, vector: vInBand, quality: 0.9)
+
+        let suggestions = try await library.mergeSuggestions()
+        guard let pair = suggestions.first(where: { Set([$0.speakerA, $0.speakerB]) == Set([unnamed.speakerID, willName.speakerID]) }) else {
+            Issue.record("expected an in-band suggestion between the unnamed and named speakers")
+            return
+        }
+        // Named speaker should win the destination preference.
+        #expect(pair.recommendedDestination == willName.speakerID)
+        #expect(pair.recommendedSource == unnamed.speakerID)
+    }
+
+    @Test
+    func recommendMergeDirectionTieBreaksByLowerID() {
+        // Both unnamed, equal segment counts → lower id wins destination.
+        let (src, dst) = SpeakerLibrary.recommendMergeDirection(
+            a: (id: 5, name: nil, segmentCount: 10),
+            b: (id: 9, name: nil, segmentCount: 10)
+        )
+        #expect(dst == 5)
+        #expect(src == 9)
+    }
+
+    /// Construct a unit vector whose cosine similarity to `u` is exactly
+    /// `cosine`. Build an orthogonal direction via Gram-Schmidt on a
+    /// fixed phase pattern, then combine `cosine * u + sin * orthogonal`.
+    /// This sidesteps the seed-dependent blend math whose actual cosine
+    /// is hard to predict without measurement.
+    static func vectorWithCosine(to u: [Float], cosine: Double) -> [Float] {
+        let dim = u.count
+        guard dim > 0 else { return [] }
+        // Seed an "other" direction with a different phase pattern.
+        var w = [Float](repeating: 0, count: dim)
+        for i in 0..<dim {
+            w[i] = Float(sin(Double(i) * 0.71 + 1.7))
+        }
+        // Project out u: w_perp = w - (w·u) * u  (assumes u is unit).
+        let dot = zip(w, u).reduce(0.0) { acc, pair in
+            acc + Double(pair.0) * Double(pair.1)
+        }
+        var wPerp = [Float](repeating: 0, count: dim)
+        for i in 0..<dim {
+            wPerp[i] = Float(Double(w[i]) - dot * Double(u[i]))
+        }
+        let normPerp = sqrt(wPerp.reduce(0.0) { acc, x in acc + Double(x) * Double(x) })
+        guard normPerp > 0 else { return u }
+        let wPerpUnit = wPerp.map { Float(Double($0) / normPerp) }
+        let sinPart = sqrt(max(0.0, 1.0 - cosine * cosine))
+        var result = [Float](repeating: 0, count: dim)
+        for i in 0..<dim {
+            result[i] = Float(cosine * Double(u[i]) + sinPart * Double(wPerpUnit[i]))
+        }
+        return result
+    }
+}
+
 /// Backdoor used by the backfill tests. Real callers go through
 /// `SpeakerLibrary.indexSegment` from the merge layer's forwarder.
 extension SpeakerLibrary {
@@ -2009,5 +2233,42 @@ extension SpeakerLibrary {
             provisional: true
         )
         _ = try indexSegment(record)
+    }
+
+    /// Backdoor for the curation tests: insert a segment whose speaker
+    /// pointer is already set (live path uses this via the merge layer's
+    /// post-resolver `indexSegment` call).
+    func testInsertSegment(
+        speakerID: Int64,
+        date: String,
+        source: String,
+        sessionID: String,
+        startTs: Double,
+        endTs: Double,
+        text: String
+    ) async throws {
+        let record = SegmentRecord(
+            speakerID: speakerID,
+            context: source == "system" ? .system : .mic,
+            sessionID: sessionID,
+            startedAt: Date(timeIntervalSince1970: startTs),
+            endedAt: Date(timeIntervalSince1970: endTs),
+            dateKey: date,
+            text: text,
+            provisional: true
+        )
+        _ = try indexSegment(record)
+    }
+
+    /// Test-only helper that forwards to the actor-internal `testForceName`.
+    /// Wrappers like this keep the test call sites compact.
+    func testSetName(speakerID: Int64, name: String) throws {
+        try self.testForceName(speakerID: speakerID, name: name)
+    }
+
+    /// Test-only helper that forwards to the actor-internal
+    /// `testForceMergedInto`.
+    func testSetMergedInto(source: Int64, into destination: Int64) throws {
+        try self.testForceMergedInto(source: source, into: destination)
     }
 }

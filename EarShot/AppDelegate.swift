@@ -83,6 +83,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var timelineWindowModel: TimelineWindowModel?
     private var timelineWindowController: TimelineWindowController?
 
+    /// Speaker curation ("Needs Naming") window. Lists unnamed speakers
+    /// ranked by speaking frequency with sample quotes for recognition,
+    /// plus a merge-suggestions section for cross-context near-matches.
+    /// Inline rename + one-click merge run through the same transactional
+    /// `SpeakerLibrary.renameSpeaker`/`mergeSpeakers` surfaces the speaker
+    /// library window uses, so all paths agree on file/DB atomicity.
+    private var speakerCurationWindowModel: SpeakerCurationWindowModel?
+    private var speakerCurationWindowController: SpeakerCurationWindowController?
+
+    /// Background refresher for `appState.unnamedSpeakerCount`. Driven by
+    /// a 30 s periodic tick so a fresh unnamed speaker (minted by the
+    /// resolver mid-call) lights up the menu bar badge without the user
+    /// opening the curation window. Cancelled in `cleanupForTermination`.
+    private var unnamedBadgeRefreshTask: Task<Void, Never>?
+
     /// S4 — recorder + downloader reused by the speaker window's
     /// "Re-enroll Me" flow. Lazy so they only initialize when needed.
     private let enrollmentRecorder = EnrollmentRecorder()
@@ -260,6 +275,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         thermalMonitor?.stop()
         sleepWakeMonitor?.stop()
         sampleTimer?.invalidate()
+        unnamedBadgeRefreshTask?.cancel()
+        unnamedBadgeRefreshTask = nil
         sleepAssertion.release()
         appNap.release()
 
@@ -497,7 +514,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             setupSpeakerLibraryWindow(library: library, resolver: resolver)
             setupTranscriptSearchWindow(library: library)
             setupTimelineWindow(library: library)
+            setupSpeakerCurationWindow(library: library, resolver: resolver)
             wirePanelActions(library: library)
+            startUnnamedBadgeRefresh()
 
             let pipeline = MicPipeline(asr: asrManager, vad: vad)
             self.micPipeline = pipeline
@@ -869,7 +888,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // We do not retroactively rewrite segments already in
                 // memory — they reflect what landed on disk at write
                 // time, and the file has just been rewritten to match.
-                _ = self
+                self?.refreshUnnamedBadgeCount()
             }
         )
         self.speakerLibraryWindowModel = model
@@ -882,6 +901,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         speakerLibraryWindowController?.show()
+    }
+
+    // MARK: Speaker curation ("Needs Naming") window
+
+    private func setupSpeakerCurationWindow(library: SpeakerLibrary, resolver: IdentityResolver) {
+        let writer = transcriptWriter
+        let model = SpeakerCurationWindowModel(
+            library: library,
+            writer: writer,
+            resolver: resolver,
+            transcriptFolderProvider: { AppSettings.transcriptsFolder },
+            onChange: { [weak self] in
+                self?.refreshUnnamedBadgeCount()
+            }
+        )
+        self.speakerCurationWindowModel = model
+        self.speakerCurationWindowController = SpeakerCurationWindowController(model: model)
+    }
+
+    func showSpeakerCurationWindow() {
+        if speakerCurationWindowController == nil {
+            presentSimpleAlert(title: "Needs Naming", message: "Library not loaded yet. Finish onboarding and let the mic pipeline boot first.")
+            return
+        }
+        speakerCurationWindowController?.show()
+    }
+
+    /// Pulls the current unnamed-speaker count from the SQLite library
+    /// and updates `appState.unnamedSpeakerCount` so the menu's status
+    /// line + "Needs Naming (N)…" item refresh on the next render.
+    /// Called after every library mutation and from the periodic
+    /// refresher. Quiet on error — the badge is a nudge, not critical.
+    private func refreshUnnamedBadgeCount() {
+        guard let library = speakerLibrary else { return }
+        Task { [weak self] in
+            let count: Int
+            do {
+                count = try await library.unnamedSpeakerCount()
+            } catch {
+                return
+            }
+            // AppDelegate is @MainActor so we're already on the main
+            // actor after the awaited library hop returns — no extra
+            // MainActor.run hop needed.
+            self?.appState.unnamedSpeakerCount = count
+        }
+    }
+
+    /// Cancels any prior refresher and starts a fresh one that pulls
+    /// the count immediately, then every 30 s. The interval is long
+    /// enough that the count never spikes wall-clock work; short enough
+    /// that a new voice during a call lights up the badge before the
+    /// user looks at the menu bar.
+    private func startUnnamedBadgeRefresh() {
+        unnamedBadgeRefreshTask?.cancel()
+        refreshUnnamedBadgeCount()
+        unnamedBadgeRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                if Task.isCancelled { return }
+                self?.refreshUnnamedBadgeCount()
+            }
+        }
     }
 
     private func wirePanelActions(library: SpeakerLibrary) {

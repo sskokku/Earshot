@@ -37,6 +37,13 @@ final class AppState {
     var isPanelVisible: Bool = false
     var lastErrorMessage: String?
 
+    /// Count of speakers in the library that still need a user-assigned
+    /// name (unnamed + non-merged + non-owner). Drives the menu bar
+    /// glyph badge and the "Needs Naming (N)…" menu item. Refreshed by
+    /// AppDelegate after every rename/merge mutation and on a periodic
+    /// timer so new voices show up without manual intervention.
+    var unnamedSpeakerCount: Int = 0
+
     /// CLAUDE.md "Metrics and errors" §: glyph error state only after N
     /// consecutive failed recoveries. The counter resets to 0 on any return
     /// to `.listening`; only at `consecutiveRecoveryFailures >= errorGlyphThreshold`

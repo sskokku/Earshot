@@ -14,9 +14,10 @@ struct MenuBarContent: View {
     let onOpenSpeakerLibrary: () -> Void
     let onOpenTranscriptSearch: () -> Void
     let onOpenTimeline: () -> Void
+    let onOpenSpeakerCuration: () -> Void
 
     var body: some View {
-        Text("EarShot — \(appState.status.label)")
+        Text(statusLine)
 
         Divider()
 
@@ -32,6 +33,11 @@ struct MenuBarContent: View {
         .disabled(!canTogglePause)
 
         Divider()
+
+        Button(needsNamingTitle) {
+            onOpenSpeakerCuration()
+        }
+        .keyboardShortcut("n", modifiers: [.command, .shift])
 
         Button("Speakers…") {
             onOpenSpeakerLibrary()
@@ -67,6 +73,20 @@ struct MenuBarContent: View {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")
+    }
+
+    private var statusLine: String {
+        if appState.unnamedSpeakerCount > 0 {
+            return "EarShot — \(appState.status.label) · \(appState.unnamedSpeakerCount) to name"
+        }
+        return "EarShot — \(appState.status.label)"
+    }
+
+    private var needsNamingTitle: String {
+        if appState.unnamedSpeakerCount > 0 {
+            return "Needs Naming (\(appState.unnamedSpeakerCount))…"
+        }
+        return "Needs Naming…"
     }
 
     private var pauseTitle: String {

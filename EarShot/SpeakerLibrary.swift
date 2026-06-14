@@ -2308,6 +2308,359 @@ actor SpeakerLibrary {
         return f
     }()
 
+    // MARK: - Speaker curation (needs-naming queue + merge suggestions)
+
+    /// One row for the curation window's "needs naming" list. Carries the
+    /// data the user needs to recognize the voice (frequency + a few sample
+    /// utterances) so they can name them without scrubbing the transcript.
+    struct UnnamedCurationRow: Sendable, Identifiable, Equatable {
+        let id: Int64
+        let displayLabel: String
+        /// Total segments attributed to this speaker (all dates, all
+        /// sources). Drives the ranking.
+        let segmentCount: Int
+        /// Mic-context embedding count — useful at a glance when the user
+        /// decides whether to merge a thinly-evidenced row.
+        let micEmbeddingCount: Int
+        let systemEmbeddingCount: Int
+        /// Up to N sample utterances, longest+most-recent first. Picked
+        /// to aid recognition.
+        let sampleQuotes: [SampleQuote]
+    }
+
+    struct SampleQuote: Sendable, Identifiable, Equatable {
+        let id: Int64
+        let text: String
+        let startedAt: Date
+        let source: Context
+    }
+
+    /// Likely-same-person suggestion: a pair of active (non-merged)
+    /// speakers whose cross-context cosine similarity falls in the
+    /// "just below the auto-merge threshold" band. One-click confirm in
+    /// the curation UI runs `mergeSpeakers(source:into:)` using the
+    /// recommended direction.
+    struct MergeSuggestion: Sendable, Identifiable, Equatable {
+        /// "minID-maxID" so SwiftUI ForEach has a stable key per pair.
+        let id: String
+        let speakerA: Int64
+        let speakerALabel: String
+        let speakerB: Int64
+        let speakerBLabel: String
+        let similarity: Double
+        /// Merge `recommendedSource` INTO `recommendedDestination`.
+        /// Destination preference order: named speaker > more segments >
+        /// lower id.
+        let recommendedSource: Int64
+        let recommendedDestination: Int64
+    }
+
+    /// Count of speakers that need naming: unnamed (name IS NULL) +
+    /// non-merged + non-owner. Powers the menu bar badge so the UI can
+    /// nudge the user toward the curation surface without opening it.
+    func unnamedSpeakerCount() throws -> Int {
+        let ownerID = AppSettings.ownerSpeakerIDValue
+        return try dbQueue.read { db in
+            let ownerClause: String
+            let args: [DatabaseValueConvertible?]
+            if let ownerID {
+                ownerClause = "AND id <> ?"
+                args = [ownerID]
+            } else {
+                ownerClause = ""
+                args = []
+            }
+            return try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT COUNT(*) FROM speakers
+                    WHERE name IS NULL
+                      AND merged_into IS NULL
+                      \(ownerClause)
+                    """,
+                arguments: StatementArguments(args)
+            ) ?? 0
+        }
+    }
+
+    /// Rows for the "Needs Naming" curation window. Ranked DESC by total
+    /// segment count so the most-frequent voices surface first — they are
+    /// the ones the user most needs to disambiguate. Excludes the owner
+    /// (already named via enrollment), merged rows, and named rows.
+    /// Sample quotes are pulled per row: longest texts first (longer
+    /// utterances carry more recognition signal), tie-broken by most
+    /// recent.
+    func unnamedSpeakersForCuration(quotesPerSpeaker: Int = 3) throws -> [UnnamedCurationRow] {
+        let ownerID = AppSettings.ownerSpeakerIDValue
+        return try dbQueue.read { db in
+            let ownerClause: String
+            let ownerArgs: [DatabaseValueConvertible?]
+            if let ownerID {
+                ownerClause = "AND s.id <> ?"
+                ownerArgs = [ownerID]
+            } else {
+                ownerClause = ""
+                ownerArgs = []
+            }
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT s.id AS id,
+                           COALESCE(s.display_label, 'Speaker ?') AS label,
+                           (SELECT COUNT(*) FROM segments seg WHERE seg.speaker_id = s.id) AS segment_count,
+                           COALESCE(SUM(CASE WHEN e.context = 'mic' THEN 1 ELSE 0 END), 0) AS mic_count,
+                           COALESCE(SUM(CASE WHEN e.context = 'system' THEN 1 ELSE 0 END), 0) AS system_count
+                    FROM speakers s
+                    LEFT JOIN embeddings e ON e.speaker_id = s.id
+                    WHERE s.name IS NULL
+                      AND s.merged_into IS NULL
+                      \(ownerClause)
+                    GROUP BY s.id
+                    ORDER BY segment_count DESC, s.id ASC
+                    """,
+                arguments: StatementArguments(ownerArgs)
+            )
+
+            var result: [UnnamedCurationRow] = []
+            result.reserveCapacity(rows.count)
+            for row in rows {
+                let speakerID: Int64 = row["id"]
+                let quotes = try Self.fetchSampleQuotes(
+                    db: db,
+                    speakerID: speakerID,
+                    limit: max(0, quotesPerSpeaker)
+                )
+                result.append(UnnamedCurationRow(
+                    id: speakerID,
+                    displayLabel: row["label"] ?? "Speaker ?",
+                    segmentCount: row["segment_count"] ?? 0,
+                    micEmbeddingCount: row["mic_count"] ?? 0,
+                    systemEmbeddingCount: row["system_count"] ?? 0,
+                    sampleQuotes: quotes
+                ))
+            }
+            return result
+        }
+    }
+
+    private static func fetchSampleQuotes(
+        db: Database,
+        speakerID: Int64,
+        limit: Int
+    ) throws -> [SampleQuote] {
+        guard limit > 0 else { return [] }
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT id, start_ts, source, text FROM segments
+                WHERE speaker_id = ? AND TRIM(text) <> ''
+                ORDER BY LENGTH(text) DESC, start_ts DESC
+                LIMIT ?
+                """,
+            arguments: [speakerID, limit]
+        )
+        return rows.map { row -> SampleQuote in
+            let id: Int64 = row["id"]
+            let ts: Double = row["start_ts"] ?? 0
+            let sourceRaw: String = row["source"] ?? "mic"
+            let text: String = row["text"] ?? ""
+            return SampleQuote(
+                id: id,
+                text: text,
+                startedAt: Date(timeIntervalSince1970: ts),
+                source: Context(rawValue: sourceRaw) ?? .mic
+            )
+        }
+    }
+
+    /// Cross-context cosine candidates that fall in the "just below the
+    /// auto-merge threshold" band — the live resolver folds cross-context
+    /// matches at >=0.75 automatically, so anything in `[minimum, ceiling)`
+    /// is a likely-same-person pair the user should confirm by hand.
+    ///
+    /// Pairs are computed over all non-merged speakers; the destination
+    /// preference is named > more segments > lower id, so a named speaker
+    /// always absorbs an unnamed one when the user confirms.
+    func mergeSuggestions(
+        minimum: Double = 0.60,
+        ceiling: Double = 0.75,
+        limit: Int = 10
+    ) throws -> [MergeSuggestion] {
+        guard minimum < ceiling, limit > 0 else { return [] }
+
+        struct ActiveSpeaker {
+            let id: Int64
+            let label: String
+            let name: String?
+            let segmentCount: Int
+        }
+
+        let (speakers, micVectors, systemVectors) = try dbQueue.read { db -> ([ActiveSpeaker], [Int64: [[Float]]], [Int64: [[Float]]]) in
+            let speakerRows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT s.id AS id,
+                           s.name AS name,
+                           COALESCE(s.display_label, s.name, 'Speaker ?') AS label,
+                           (SELECT COUNT(*) FROM segments seg WHERE seg.speaker_id = s.id) AS segment_count
+                    FROM speakers s
+                    WHERE s.merged_into IS NULL
+                    """
+            )
+            let speakers: [ActiveSpeaker] = speakerRows.map { row in
+                ActiveSpeaker(
+                    id: row["id"],
+                    label: row["label"] ?? "Speaker ?",
+                    name: row["name"],
+                    segmentCount: row["segment_count"] ?? 0
+                )
+            }
+            let activeIDs = Set(speakers.map(\.id))
+
+            func loadVectors(context: Context) throws -> [Int64: [[Float]]] {
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: "SELECT speaker_id, vector FROM embeddings WHERE context = ?",
+                    arguments: [context.rawValue]
+                )
+                var map: [Int64: [[Float]]] = [:]
+                for row in rows {
+                    let speakerID: Int64 = row["speaker_id"]
+                    guard activeIDs.contains(speakerID) else { continue }
+                    guard let blob: Data = row["vector"] else { continue }
+                    let count = blob.count / MemoryLayout<Float>.size
+                    guard count > 0 else { continue }
+                    let vector: [Float] = blob.withUnsafeBytes { raw in
+                        let floats = raw.bindMemory(to: Float.self)
+                        return Array(floats.prefix(count))
+                    }
+                    map[speakerID, default: []].append(vector)
+                }
+                return map
+            }
+
+            return (speakers, try loadVectors(context: .mic), try loadVectors(context: .system))
+        }
+
+        guard speakers.count >= 2 else { return [] }
+
+        var suggestions: [MergeSuggestion] = []
+        for i in 0..<speakers.count {
+            let a = speakers[i]
+            let aMic = micVectors[a.id] ?? []
+            let aSys = systemVectors[a.id] ?? []
+            for j in (i + 1)..<speakers.count {
+                let b = speakers[j]
+                let bMic = micVectors[b.id] ?? []
+                let bSys = systemVectors[b.id] ?? []
+                // Cross-context only: A.mic vs B.system  AND  A.system vs B.mic.
+                let cross1 = Self.maxCosine(aMic, bSys)
+                let cross2 = Self.maxCosine(aSys, bMic)
+                let score = max(cross1, cross2)
+                guard score >= minimum, score < ceiling else { continue }
+
+                let (src, dst) = Self.recommendMergeDirection(
+                    a: (id: a.id, name: a.name, segmentCount: a.segmentCount),
+                    b: (id: b.id, name: b.name, segmentCount: b.segmentCount)
+                )
+                let pairKey = "\(min(a.id, b.id))-\(max(a.id, b.id))"
+                suggestions.append(MergeSuggestion(
+                    id: pairKey,
+                    speakerA: a.id,
+                    speakerALabel: a.label,
+                    speakerB: b.id,
+                    speakerBLabel: b.label,
+                    similarity: score,
+                    recommendedSource: src,
+                    recommendedDestination: dst
+                ))
+            }
+        }
+
+        suggestions.sort { $0.similarity > $1.similarity }
+        if suggestions.count > limit {
+            return Array(suggestions.prefix(limit))
+        }
+        return suggestions
+    }
+
+    /// Destination preference: named > more segments > lower id. The
+    /// other speaker becomes the source. Inputs are (id, name?, segmentCount)
+    /// tuples so callers can hand in arbitrary speaker carriers.
+    static func recommendMergeDirection(
+        a: (id: Int64, name: String?, segmentCount: Int),
+        b: (id: Int64, name: String?, segmentCount: Int)
+    ) -> (source: Int64, destination: Int64) {
+        let aNamed = a.name != nil
+        let bNamed = b.name != nil
+        if aNamed && !bNamed { return (b.id, a.id) }
+        if bNamed && !aNamed { return (a.id, b.id) }
+        if a.segmentCount != b.segmentCount {
+            return a.segmentCount > b.segmentCount ? (b.id, a.id) : (a.id, b.id)
+        }
+        return a.id <= b.id ? (b.id, a.id) : (a.id, b.id)
+    }
+
+    /// Max cosine across two embedding bags. Empty bags return -1 so
+    /// they cannot accidentally satisfy a positive threshold.
+    private static func maxCosine(_ left: [[Float]], _ right: [[Float]]) -> Double {
+        guard !left.isEmpty, !right.isEmpty else { return -1 }
+        var best: Double = -1
+        for l in left {
+            for r in right {
+                let s = cosineSimilarity(l, r)
+                if s > best { best = s }
+            }
+        }
+        return best
+    }
+
+    /// Cosine similarity (same form the IdentityResolver uses). Returns
+    /// 0 for length-mismatched or empty inputs.
+    nonisolated static func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Double {
+        guard a.count == b.count, !a.isEmpty else { return 0 }
+        var dot: Double = 0
+        var na: Double = 0
+        var nb: Double = 0
+        for i in 0..<a.count {
+            let ai = Double(a[i])
+            let bi = Double(b[i])
+            dot += ai * bi
+            na += ai * ai
+            nb += bi * bi
+        }
+        let denom = na.squareRoot() * nb.squareRoot()
+        return denom > 0 ? dot / denom : 0
+    }
+
+    // MARK: - Test-only setters
+
+    /// Test-only: set a speaker's name + display_label directly via SQL,
+    /// without running `renameSpeaker`'s transactional Markdown rewrite.
+    /// Used by the curation unit tests so they don't need to stage a
+    /// fake transcript folder + writer just to flip `name`.
+    func testForceName(speakerID: Int64, name: String?) throws {
+        try dbQueue.write { db in
+            try db.execute(
+                sql: "UPDATE speakers SET name = ?, display_label = ? WHERE id = ?",
+                arguments: [name, name, speakerID]
+            )
+        }
+    }
+
+    /// Test-only: mark a speaker as merged into another via SQL, without
+    /// running `mergeSpeakers`'s transactional move. Used by the
+    /// curation tests so they don't need to stage a fake transcript
+    /// folder + writer just to populate `merged_into`.
+    func testForceMergedInto(source: Int64, into destination: Int64) throws {
+        try dbQueue.write { db in
+            try db.execute(
+                sql: "UPDATE speakers SET merged_into = ? WHERE id = ?",
+                arguments: [destination, source]
+            )
+        }
+    }
+
     // MARK: - S4 errors
 
     enum SpeakerLibraryError: LocalizedError {
