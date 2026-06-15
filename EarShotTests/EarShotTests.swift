@@ -2273,6 +2273,383 @@ extension SpeakerLibrary {
     }
 }
 
+// MARK: - Resolver match-decision telemetry (v5)
+
+/// Cover the match-decision telemetry surface: per-decision row
+/// persistence from IdentityResolver, ground-truth backfill on merge,
+/// retroactive analysis on existing merged pairs, and the aggregate
+/// stats the SpeakerCurationWindow renders.
+struct MatchDecisionTelemetryTests {
+
+    private static func resetOwnerAppSettings() {
+        AppSettings.ownerSpeakerIDValue = nil
+    }
+
+    private func makeScratchFolder() -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("EarShotMatchDecisionTests-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    /// A resolver miss writes a NO-MATCH row through `recordMatchDecision`
+    /// carrying the best-same / best-cross scores and the thresholds in
+    /// force at decision time. The row is reachable via the stats query.
+    @Test
+    func resolverMissPersistsNoMatchRow() async throws {
+        Self.resetOwnerAppSettings()
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let existing = try await library.createUnnamedSpeaker()
+        let baseVec = IdentityResolverTests.makeDirectionalEmbedding(dim: 256, seed: 7)
+        try await library.recordEmbedding(speakerID: existing.speakerID, context: .mic, vector: baseVec, quality: 0.9)
+
+        // Query vector at cosine 0.55 to baseVec — below the 0.65 gate.
+        let queryVec = SpeakerCurationTests.vectorWithCosine(to: baseVec, cosine: 0.55)
+
+        let resolver = IdentityResolver(library: library)
+        _ = await resolver.resolve(
+            source: .mic,
+            sessionID: UUID(),
+            slotLabel: "Speaker 1",
+            embedding: queryVec,
+            durationSeconds: 1.0
+        )
+
+        let stats = try await library.matchDecisionStats()
+        #expect(stats.liveDecisionTotal == 1)
+        #expect(stats.liveNoMatchTotal == 1)
+        // No ground truth yet — only the labeled-miss count is gated on
+        // the merge. The histogram is empty for now.
+        #expect(stats.liveLabeledMissTotal == 0)
+    }
+
+    /// After the user merges the freshly-minted speaker into the
+    /// pre-existing one, the prior NO-MATCH row gets ground_truth_speaker_id
+    /// backfilled inside the same transaction as the merge — and the
+    /// labeled-miss count reflects it.
+    @Test
+    func mergeBackfillsGroundTruthOnPriorDecisions() async throws {
+        Self.resetOwnerAppSettings()
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let existing = try await library.createUnnamedSpeaker()
+        let baseVec = IdentityResolverTests.makeDirectionalEmbedding(dim: 256, seed: 13)
+        try await library.recordEmbedding(speakerID: existing.speakerID, context: .mic, vector: baseVec, quality: 0.9)
+
+        // Force a miss at cosine 0.61 — below 0.65 same-context gate.
+        let queryVec = SpeakerCurationTests.vectorWithCosine(to: baseVec, cosine: 0.61)
+        let resolver = IdentityResolver(library: library)
+        let res = await resolver.resolve(
+            source: .mic,
+            sessionID: UUID(),
+            slotLabel: "Speaker 1",
+            embedding: queryVec,
+            durationSeconds: 1.0
+        )
+        // The miss minted a new speaker.
+        #expect(res.speakerID != existing.speakerID)
+
+        let folder = makeScratchFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let writer = TranscriptWriter(folder: folder)
+        _ = try await library.mergeSpeakers(
+            source: res.speakerID,
+            into: existing.speakerID,
+            todayDateKey: "2026-06-15",
+            transcriptFolder: folder,
+            writer: writer
+        )
+
+        let stats = try await library.matchDecisionStats()
+        #expect(stats.liveLabeledMissTotal == 1)
+        // The labeled miss's near-miss score against the correct speaker
+        // sits near the synthetic cosine, modulo float precision.
+        if let m = stats.medianSameContextNearMiss {
+            #expect(abs(m - 0.61) < 0.02)
+        } else {
+            Issue.record("expected a same-context near-miss median, got nil")
+        }
+    }
+
+    /// Ground-truth bubbles through a chain of merges: A→B then B→C ends
+    /// up with rows that originally referenced A pointing to C.
+    @Test
+    func groundTruthBackfillIsTransitiveAcrossSequentialMerges() async throws {
+        Self.resetOwnerAppSettings()
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        // Three unnamed speakers A, B, C.
+        let a = try await library.createUnnamedSpeaker()
+        let b = try await library.createUnnamedSpeaker()
+        let c = try await library.createUnnamedSpeaker()
+        // Seed each with an embedding so the merge path's
+        // movedEmbeddings count is non-trivial; A's embedding is what
+        // we'll cosine-against in the synthetic resolve.
+        let aVec = IdentityResolverTests.makeDirectionalEmbedding(dim: 256, seed: 31)
+        let bVec = IdentityResolverTests.makeDirectionalEmbedding(dim: 256, seed: 32)
+        let cVec = IdentityResolverTests.makeDirectionalEmbedding(dim: 256, seed: 33)
+        try await library.recordEmbedding(speakerID: a.speakerID, context: .mic, vector: aVec, quality: 0.9)
+        try await library.recordEmbedding(speakerID: b.speakerID, context: .mic, vector: bVec, quality: 0.9)
+        try await library.recordEmbedding(speakerID: c.speakerID, context: .mic, vector: cVec, quality: 0.9)
+
+        // Synthesize a NO-MATCH row whose resolved_speaker_id = A.
+        await library.recordMatchDecision(SpeakerLibrary.MatchDecisionRecord(
+            decidedAt: Date(),
+            context: .mic,
+            sessionID: UUID(),
+            slotLabel: "Speaker 1",
+            outcome: .noMatch,
+            resolvedSpeakerID: a.speakerID,
+            bestSameSpeakerID: a.speakerID,
+            bestSameScore: 0.62,
+            bestCrossSpeakerID: nil,
+            bestCrossScore: nil,
+            sameThreshold: 0.65,
+            crossThreshold: 0.75,
+            sameCandidateCount: 1,
+            crossCandidateCount: 0
+        ))
+
+        let folder = makeScratchFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let writer = TranscriptWriter(folder: folder)
+
+        // Step 1: merge A → B.
+        _ = try await library.mergeSpeakers(
+            source: a.speakerID,
+            into: b.speakerID,
+            todayDateKey: "2026-06-15",
+            transcriptFolder: folder,
+            writer: writer
+        )
+        let afterFirst = try await library.labeledMissDecisions()
+        #expect(afterFirst.count == 1)
+        #expect(afterFirst.first?.groundTruthSpeakerID == b.speakerID)
+
+        // Step 2: merge B → C. The row should now point to C.
+        _ = try await library.mergeSpeakers(
+            source: b.speakerID,
+            into: c.speakerID,
+            todayDateKey: "2026-06-15",
+            transcriptFolder: folder,
+            writer: writer
+        )
+        let afterSecond = try await library.labeledMissDecisions()
+        #expect(afterSecond.count == 1)
+        #expect(afterSecond.first?.groundTruthSpeakerID == c.speakerID)
+    }
+
+    /// Retroactive analysis: real `mergeSpeakers` writes a merge_audit
+    /// row with max same- and cross-context cosines snapshotted BEFORE
+    /// embedding reassignment, so `historicalMergePairScores` returns
+    /// the values that were on disk at merge time.
+    @Test
+    func historicalMergePairScoresComputesPerContextMaxCosine() async throws {
+        Self.resetOwnerAppSettings()
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let src = try await library.createUnnamedSpeaker()
+        let dst = try await library.createUnnamedSpeaker()
+
+        // Source has one mic + one system embedding.
+        let srcMic = IdentityResolverTests.makeDirectionalEmbedding(dim: 256, seed: 51)
+        let srcSys = IdentityResolverTests.makeDirectionalEmbedding(dim: 256, seed: 52)
+        try await library.recordEmbedding(speakerID: src.speakerID, context: .mic, vector: srcMic, quality: 0.9)
+        try await library.recordEmbedding(speakerID: src.speakerID, context: .system, vector: srcSys, quality: 0.9)
+
+        // Destination has one mic embedding at cosine 0.7 to srcMic (same-context)
+        // and one system embedding at cosine 0.55 to srcMic (cross-context).
+        let dstMic = SpeakerCurationTests.vectorWithCosine(to: srcMic, cosine: 0.7)
+        let dstSys = SpeakerCurationTests.vectorWithCosine(to: srcMic, cosine: 0.55)
+        try await library.recordEmbedding(speakerID: dst.speakerID, context: .mic, vector: dstMic, quality: 0.9)
+        try await library.recordEmbedding(speakerID: dst.speakerID, context: .system, vector: dstSys, quality: 0.9)
+
+        // Real merge — writes the audit row.
+        let folder = makeScratchFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let writer = TranscriptWriter(folder: folder)
+        _ = try await library.mergeSpeakers(
+            source: src.speakerID,
+            into: dst.speakerID,
+            todayDateKey: "2026-06-15",
+            transcriptFolder: folder,
+            writer: writer
+        )
+
+        let pairs = try await library.historicalMergePairScores()
+        #expect(pairs.count == 1)
+        guard let pair = pairs.first else { return }
+        #expect(pair.sourceSpeakerID == src.speakerID)
+        #expect(pair.destinationSpeakerID == dst.speakerID)
+        guard let same = pair.maxSameContextScore else {
+            Issue.record("expected a same-context score, got nil")
+            return
+        }
+        #expect(abs(same - 0.70) < 0.02)
+        guard let cross = pair.maxCrossContextScore else {
+            Issue.record("expected a cross-context score, got nil")
+            return
+        }
+        #expect(abs(cross - 0.55) < 0.02)
+    }
+
+    /// Threshold sweep: a labeled miss with same-context near-miss = 0.62
+    /// is caught at T ≤ 0.62, missed at T > 0.62. Pure aggregation math —
+    /// verifies the sweep counts true-positives correctly per row. B is
+    /// intentionally left without an embedding so the A→B merge audit
+    /// row carries NULL scores and never spuriously inflates the sweep.
+    @Test
+    func thresholdSweepCountsTruePositivesAcrossLabeledMisses() async throws {
+        Self.resetOwnerAppSettings()
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let a = try await library.createUnnamedSpeaker()
+        let b = try await library.createUnnamedSpeaker()
+        // Only A has an embedding — keeps the merge audit's cosines NULL
+        // so the threshold sweep only sees the labeled live miss row.
+        let vA = IdentityResolverTests.makeDirectionalEmbedding(dim: 256, seed: 61)
+        try await library.recordEmbedding(speakerID: a.speakerID, context: .mic, vector: vA, quality: 0.9)
+
+        // Synthesize one labeled NO-MATCH row at same-context score 0.62.
+        // best_same = B (the eventual ground truth) so the sameScore
+        // filter (best_same == ground_truth) returns 0.62 after the
+        // A→B merge backfills ground_truth onto the row.
+        await library.recordMatchDecision(SpeakerLibrary.MatchDecisionRecord(
+            decidedAt: Date(),
+            context: .mic,
+            sessionID: UUID(),
+            slotLabel: "Speaker 1",
+            outcome: .noMatch,
+            resolvedSpeakerID: a.speakerID,
+            bestSameSpeakerID: b.speakerID,
+            bestSameScore: 0.62,
+            bestCrossSpeakerID: nil,
+            bestCrossScore: nil,
+            sameThreshold: 0.65,
+            crossThreshold: 0.75,
+            sameCandidateCount: 2,
+            crossCandidateCount: 0
+        ))
+
+        // Merge A → B: rows whose resolved_speaker_id = A get ground_truth = B.
+        let folder = makeScratchFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let writer = TranscriptWriter(folder: folder)
+        _ = try await library.mergeSpeakers(
+            source: a.speakerID,
+            into: b.speakerID,
+            todayDateKey: "2026-06-15",
+            transcriptFolder: folder,
+            writer: writer
+        )
+
+        let stats = try await library.matchDecisionStats(
+            thresholdSweep: [0.55, 0.60, 0.62, 0.65, 0.70]
+        )
+        // At 0.55, 0.60, 0.62 we'd have caught the miss (score ≥ T);
+        // at 0.65 and 0.70 we miss it.
+        let byT: [Double: Int] = Dictionary(
+            uniqueKeysWithValues: stats.thresholdSweep.map { ($0.threshold, $0.sameContextTruePositives) }
+        )
+        #expect(byT[0.55] == 1)
+        #expect(byT[0.60] == 1)
+        #expect(byT[0.62] == 1)
+        #expect(byT[0.65] == 0)
+        #expect(byT[0.70] == 0)
+    }
+
+    /// matchDecisionStats sums live + historical sources into one
+    /// distribution. Live labeled miss at 0.62 + retroactive merge
+    /// audit at 0.70 → combined median ≈ 0.66.
+    @Test
+    func statsAggregatesLiveAndHistoricalScores() async throws {
+        Self.resetOwnerAppSettings()
+        let library = try IdentityResolverTests.makeMemoryLibrary()
+        let v = IdentityResolverTests.makeDirectionalEmbedding(dim: 256, seed: 71)
+
+        // C is the eventual ground truth. Its mic embedding is `v`.
+        let c = try await library.createUnnamedSpeaker()
+        try await library.recordEmbedding(speakerID: c.speakerID, context: .mic, vector: v, quality: 0.9)
+
+        // A is the about-to-be-merged speaker. Its mic embedding sits at
+        // cosine 0.70 to v — that becomes the historical merge audit score.
+        let a = try await library.createUnnamedSpeaker()
+        let aVec = SpeakerCurationTests.vectorWithCosine(to: v, cosine: 0.70)
+        try await library.recordEmbedding(speakerID: a.speakerID, context: .mic, vector: aVec, quality: 0.9)
+
+        // Live labeled miss: best-same scored against c at 0.62.
+        // resolved=a so the backfill on the upcoming a→c merge tags
+        // this row with ground_truth=c, and the sameScore filter
+        // (best_same == ground_truth) returns 0.62.
+        await library.recordMatchDecision(SpeakerLibrary.MatchDecisionRecord(
+            decidedAt: Date(),
+            context: .mic,
+            sessionID: UUID(),
+            slotLabel: "Speaker 1",
+            outcome: .noMatch,
+            resolvedSpeakerID: a.speakerID,
+            bestSameSpeakerID: c.speakerID,
+            bestSameScore: 0.62,
+            bestCrossSpeakerID: nil,
+            bestCrossScore: nil,
+            sameThreshold: 0.65,
+            crossThreshold: 0.75,
+            sameCandidateCount: 2,
+            crossCandidateCount: 0
+        ))
+
+        // Real merge — writes merge_audit (max same ≈ 0.70) AND
+        // backfills ground_truth on the live row.
+        let folder = makeScratchFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let writer = TranscriptWriter(folder: folder)
+        _ = try await library.mergeSpeakers(
+            source: a.speakerID, into: c.speakerID,
+            todayDateKey: "2026-06-15",
+            transcriptFolder: folder, writer: writer
+        )
+
+        let stats = try await library.matchDecisionStats()
+        #expect(stats.liveLabeledMissTotal == 1)
+        #expect(stats.historicalMergePairCount == 1)
+
+        // Combined scores [0.62 live, 0.70 historical] → median = 0.66.
+        guard let median = stats.medianSameContextNearMiss else {
+            Issue.record("expected a same-context median, got nil")
+            return
+        }
+        #expect(abs(median - 0.66) < 0.02)
+
+        // Source clustering: the labeled miss is on mic.
+        #expect(stats.micMissCount == 1)
+        #expect(stats.systemMissCount == 0)
+    }
+
+    /// Histogram bucketing — pure function; 0.62 lands in bin [0.60, 0.65),
+    /// 0.05 lands in bin [0.05, 0.10), 0.99 lands in the final bin.
+    @Test
+    func histogramBucketsScoresByFiveHundredthsWidth() {
+        let bins = SpeakerLibrary.histogram(scores: [0.62, 0.05, 0.99, 0.62])
+        #expect(bins.count == 20)
+        // 0.62 → index 12 (lowerBound ≈ 0.60, tolerated for IEEE 754
+        // drift since 12 * 0.05 in Double is 0.6000000000000001).
+        #expect(abs(bins[12].lowerBound - 0.60) < 1e-9)
+        #expect(bins[12].count == 2)
+        // 0.05 → index 1 (lowerBound 0.05).
+        #expect(bins[1].count == 1)
+        // 0.99 → index 19 (last bin).
+        #expect(bins[19].count == 1)
+        // Empty bin elsewhere.
+        #expect(bins[5].count == 0)
+    }
+
+    /// Median helper — odd count picks middle, even count averages.
+    @Test
+    func medianHandlesEvenAndOddCounts() {
+        #expect(SpeakerLibrary.median([]) == nil)
+        #expect(SpeakerLibrary.median([0.5]) == 0.5)
+        #expect(SpeakerLibrary.median([0.1, 0.2, 0.3]) == 0.2)
+        let evenMedian = SpeakerLibrary.median([0.1, 0.2, 0.3, 0.4]) ?? -1
+        #expect(abs(evenMedian - 0.25) < 1e-9)
+    }
+}
+
 // MARK: - Bookmark rendering (panel + reader divider)
 
 /// Cover the end-to-end of bookmark divider rendering: the parser round-

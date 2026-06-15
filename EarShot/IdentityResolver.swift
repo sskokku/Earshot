@@ -113,12 +113,36 @@ actor IdentityResolver {
             let minted = await mintNewSpeaker()
             cache[key] = minted
             log.info("[resolve] NO-EMBEDDING source=\(source.rawValue, privacy: .public) session=\(sessionPrefix, privacy: .public) slot=\(slotLabel, privacy: .public) → minted speaker=\(minted.speakerID) (\(minted.displayLabel, privacy: .public))")
+            await library.recordMatchDecision(SpeakerLibrary.MatchDecisionRecord(
+                decidedAt: Date(),
+                context: source,
+                sessionID: sessionID,
+                slotLabel: slotLabel,
+                outcome: .noEmbedding,
+                resolvedSpeakerID: minted.speakerID == 0 ? nil : minted.speakerID,
+                bestSameSpeakerID: nil,
+                bestSameScore: nil,
+                bestCrossSpeakerID: nil,
+                bestCrossScore: nil,
+                sameThreshold: sameContextThreshold,
+                crossThreshold: crossContextThreshold,
+                sameCandidateCount: 0,
+                crossCandidateCount: 0
+            ))
             return minted
         }
 
         // Same-context match first.
         let sameCandidates = (try? await library.allEmbeddings(context: source)) ?? []
         let sameBest = bestMatch(query: embedding, candidates: sameCandidates)
+
+        // Cross-context evaluation runs eagerly so the telemetry row
+        // captures BOTH best-same and best-cross even when same wins. The
+        // candidate sweep is cheap (≤ 10·N rows) and the row is the
+        // diagnostic surface the curation window leans on.
+        let otherContext: SpeakerLibrary.Context = (source == .mic) ? .system : .mic
+        let crossCandidates = (try? await library.allEmbeddings(context: otherContext)) ?? []
+        let crossBest = bestMatch(query: embedding, candidates: crossCandidates)
 
         if let (sid, score) = sameBest, score >= sameContextThreshold {
             let label = await displayLabel(forSpeakerID: sid)
@@ -131,14 +155,24 @@ actor IdentityResolver {
                 durationSeconds: durationSeconds
             )
             log.info("[resolve] MATCH-SAME source=\(source.rawValue, privacy: .public) session=\(sessionPrefix, privacy: .public) slot=\(slotLabel, privacy: .public) → speaker=\(sid) (\(label, privacy: .public)) sim=\(Self.fmt(score)) ≥ threshold=\(Self.fmt(self.sameContextThreshold)) candidates=\(sameCandidates.count)")
+            await library.recordMatchDecision(SpeakerLibrary.MatchDecisionRecord(
+                decidedAt: Date(),
+                context: source,
+                sessionID: sessionID,
+                slotLabel: slotLabel,
+                outcome: .matchSame,
+                resolvedSpeakerID: sid,
+                bestSameSpeakerID: sameBest?.0,
+                bestSameScore: sameBest?.1,
+                bestCrossSpeakerID: crossBest?.0,
+                bestCrossScore: crossBest?.1,
+                sameThreshold: sameContextThreshold,
+                crossThreshold: crossContextThreshold,
+                sameCandidateCount: sameCandidates.count,
+                crossCandidateCount: crossCandidates.count
+            ))
             return res
         }
-
-        // Cross-context fallback. Pull the other context's embeddings and
-        // try a looser threshold.
-        let otherContext: SpeakerLibrary.Context = (source == .mic) ? .system : .mic
-        let crossCandidates = (try? await library.allEmbeddings(context: otherContext)) ?? []
-        let crossBest = bestMatch(query: embedding, candidates: crossCandidates)
 
         if let (sid, score) = crossBest, score >= crossContextThreshold {
             let label = await displayLabel(forSpeakerID: sid)
@@ -153,6 +187,22 @@ actor IdentityResolver {
                 durationSeconds: durationSeconds
             )
             log.info("[resolve] MATCH-CROSS source=\(source.rawValue, privacy: .public) session=\(sessionPrefix, privacy: .public) slot=\(slotLabel, privacy: .public) → speaker=\(sid) (\(label, privacy: .public)) sim=\(Self.fmt(score)) ≥ threshold=\(Self.fmt(self.crossContextThreshold)) other-context-candidates=\(crossCandidates.count)")
+            await library.recordMatchDecision(SpeakerLibrary.MatchDecisionRecord(
+                decidedAt: Date(),
+                context: source,
+                sessionID: sessionID,
+                slotLabel: slotLabel,
+                outcome: .matchCross,
+                resolvedSpeakerID: sid,
+                bestSameSpeakerID: sameBest?.0,
+                bestSameScore: sameBest?.1,
+                bestCrossSpeakerID: crossBest?.0,
+                bestCrossScore: crossBest?.1,
+                sameThreshold: sameContextThreshold,
+                crossThreshold: crossContextThreshold,
+                sameCandidateCount: sameCandidates.count,
+                crossCandidateCount: crossCandidates.count
+            ))
             return res
         }
 
@@ -171,6 +221,22 @@ actor IdentityResolver {
             )
         }
         log.info("[resolve] NO-MATCH source=\(source.rawValue, privacy: .public) session=\(sessionPrefix, privacy: .public) slot=\(slotLabel, privacy: .public) best-same=[\(sameSummary, privacy: .public)] (threshold=\(Self.fmt(self.sameContextThreshold))) best-cross=[\(crossSummary, privacy: .public)] (threshold=\(Self.fmt(self.crossContextThreshold))) → minted speaker=\(minted.speakerID) (\(minted.displayLabel, privacy: .public))")
+        await library.recordMatchDecision(SpeakerLibrary.MatchDecisionRecord(
+            decidedAt: Date(),
+            context: source,
+            sessionID: sessionID,
+            slotLabel: slotLabel,
+            outcome: .noMatch,
+            resolvedSpeakerID: minted.speakerID == 0 ? nil : minted.speakerID,
+            bestSameSpeakerID: sameBest?.0,
+            bestSameScore: sameBest?.1,
+            bestCrossSpeakerID: crossBest?.0,
+            bestCrossScore: crossBest?.1,
+            sameThreshold: sameContextThreshold,
+            crossThreshold: crossContextThreshold,
+            sameCandidateCount: sameCandidates.count,
+            crossCandidateCount: crossCandidates.count
+        ))
         return minted
     }
 

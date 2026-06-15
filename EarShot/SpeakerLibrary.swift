@@ -92,6 +92,148 @@ actor SpeakerLibrary {
         let id: UUID
     }
 
+    // MARK: - Resolver telemetry (match decisions)
+
+    /// One resolver outcome class per decision-row. Mirrors the os_log
+    /// tags the resolver already emits, minus CACHE-HIT (echoes a prior
+    /// decision, carries no candidate-set scores, so it would just be
+    /// nulls on every analytic column).
+    enum MatchDecisionOutcome: String, Sendable {
+        case matchSame = "match-same"
+        case matchCross = "match-cross"
+        case noMatch = "no-match"
+        case noEmbedding = "no-embedding"
+    }
+
+    /// Carrier the IdentityResolver hands to `recordMatchDecision`. One
+    /// row per resolve call captures everything the user would later need
+    /// to ask "why did this voice mint a new speaker instead of matching?"
+    /// — the per-context best candidate + score + the thresholds in force
+    /// at decision time (so a future threshold change does not retroactively
+    /// invalidate the historical record).
+    struct MatchDecisionRecord: Sendable {
+        let decidedAt: Date
+        let context: Context
+        let sessionID: UUID
+        let slotLabel: String
+        let outcome: MatchDecisionOutcome
+        /// The speaker the resolver returned: an existing speaker on
+        /// MATCH-SAME/CROSS, the freshly-minted speaker on NO-MATCH, the
+        /// minted-or-fallback on NO-EMBEDDING. Nil only if the mint
+        /// itself failed.
+        let resolvedSpeakerID: Int64?
+        let bestSameSpeakerID: Int64?
+        let bestSameScore: Double?
+        let bestCrossSpeakerID: Int64?
+        let bestCrossScore: Double?
+        let sameThreshold: Double
+        let crossThreshold: Double
+        let sameCandidateCount: Int
+        let crossCandidateCount: Int
+    }
+
+    /// One labeled NO-MATCH row used by the threshold-sweep math. Pulled
+    /// from `match_decisions` after `ground_truth_speaker_id` has been
+    /// backfilled by a user merge. The two scores (best-same vs the
+    /// ground-truth speaker, best-cross vs ground-truth) are nil when the
+    /// correct speaker was not the top candidate in that context — useful
+    /// to distinguish "threshold too strict" (score is high but below
+    /// gate) from "embedding noise" (correct speaker wasn't even closest).
+    struct LabeledMissRow: Sendable {
+        let context: Context
+        let groundTruthSpeakerID: Int64
+        let sameScore: Double?      // best_same_score, only if best_same_speaker_id == ground_truth
+        let crossScore: Double?     // best_cross_score, only if best_cross_speaker_id == ground_truth
+        let sameThreshold: Double
+        let crossThreshold: Double
+        /// True if the best candidate IN EITHER CONTEXT was a NAMED speaker
+        /// different from ground truth — proxy for "lowering the threshold
+        /// here would have caused a false merge into a named person."
+        let bestSameWasNamedNonMatch: Bool
+        let bestCrossWasNamedNonMatch: Bool
+    }
+
+    /// Retroactive analysis surface: for every speaker that the user has
+    /// already merged into another (`speakers.merged_into IS NOT NULL`),
+    /// the maximum cosine similarity between source and destination
+    /// embeddings AS THEY EXIST NOW. This is an upper-bound proxy for the
+    /// near-miss score the live resolver would have seen at the original
+    /// split moment — embeddings drift but the per-context cap (10) keeps
+    /// drift bounded.
+    struct HistoricalMergeScore: Sendable, Identifiable {
+        var id: Int64 { sourceSpeakerID }
+        let sourceSpeakerID: Int64
+        let destinationSpeakerID: Int64
+        let destinationLabel: String
+        /// max(maxCosine(source.mic, destination.mic),
+        ///     maxCosine(source.system, destination.system)).
+        /// Nil if either side has no embeddings in any same-context bag.
+        let maxSameContextScore: Double?
+        /// max(maxCosine(source.mic, destination.system),
+        ///     maxCosine(source.system, destination.mic)).
+        let maxCrossContextScore: Double?
+    }
+
+    /// Aggregate the curation window renders. Combines live decision
+    /// telemetry (sharp scores at decision time, only available going
+    /// forward) and retroactive merge analysis (works on existing data).
+    struct MatchDecisionStats: Sendable {
+
+        struct HistogramBin: Sendable, Identifiable {
+            /// Bin lower bound, encoded as id so SwiftUI ForEach keys stably.
+            var id: Double { lowerBound }
+            let lowerBound: Double
+            let upperBound: Double
+            let count: Int
+        }
+
+        struct ThresholdSweepRow: Sendable, Identifiable {
+            var id: Double { threshold }
+            let threshold: Double
+            /// Labeled misses where best-same speaker == ground truth AND
+            /// best-same score ≥ threshold. "Lowering the gate to T would
+            /// have caught this many past splits in same-context."
+            let sameContextTruePositives: Int
+            /// Labeled misses where best-same speaker != ground truth AND
+            /// best-same speaker is NAMED AND best-same score ≥ threshold.
+            /// "Lowering the gate to T would have caused this many wrong
+            /// merges into a named person."
+            let sameContextFalsePositives: Int
+            let crossContextTruePositives: Int
+            let crossContextFalsePositives: Int
+        }
+
+        struct PerSpeakerMissRow: Sendable, Identifiable {
+            var id: Int64 { speakerID }
+            let speakerID: Int64
+            let label: String
+            let missCount: Int
+            let medianNearMissScore: Double?
+        }
+
+        let currentSameThreshold: Double
+        let currentCrossThreshold: Double
+
+        let liveDecisionTotal: Int
+        let liveNoMatchTotal: Int
+        let liveLabeledMissTotal: Int
+
+        let historicalMergePairCount: Int
+
+        let sameContextHistogram: [HistogramBin]
+        let crossContextHistogram: [HistogramBin]
+
+        let medianSameContextNearMiss: Double?
+        let medianCrossContextNearMiss: Double?
+
+        let micMissCount: Int
+        let systemMissCount: Int
+
+        let topMissedSpeakers: [PerSpeakerMissRow]
+
+        let thresholdSweep: [ThresholdSweepRow]
+    }
+
     private let log = Logger(subsystem: "com.earshot.app", category: "SpeakerLibrary")
     private let dbQueue: DatabaseQueue
 
@@ -286,6 +428,67 @@ actor SpeakerLibrary {
                     """,
                 arguments: [SpeakerLibrary.timestampString()]
             )
+        }
+
+        // Resolver telemetry. One row per IdentityResolver decision
+        // (except CACHE-HIT, which echoes an earlier decision and has no
+        // candidate scores). Captures the per-context best candidate +
+        // score + thresholds-in-force so a future threshold change does
+        // not retroactively invalidate the historical record. The
+        // `ground_truth_speaker_id` column is null until the user later
+        // merges the row's resolved speaker — `mergeSpeakers` backfills
+        // it inside the same transaction as the merge itself, which is
+        // how "the correct answer was Y all along" propagates onto
+        // every prior misclassification.
+        //
+        // Volume: ~one row per finalized utterance with an embedding.
+        // A heavy day (~1000 segments) is ~150 KB on disk; a year is
+        // ~50 MB. Small enough that no retention policy lives here
+        // today; if it becomes a problem a 90-day rolling delete is a
+        // one-liner.
+        migrator.registerMigration("v5_match_decisions") { db in
+            try db.execute(sql: """
+                CREATE TABLE match_decisions (
+                    id INTEGER PRIMARY KEY,
+                    decided_at TEXT NOT NULL,
+                    source TEXT NOT NULL CHECK (source IN ('mic','system')),
+                    session_id TEXT NOT NULL,
+                    slot_label TEXT NOT NULL,
+                    outcome TEXT NOT NULL CHECK (outcome IN ('match-same','match-cross','no-match','no-embedding')),
+                    resolved_speaker_id INTEGER REFERENCES speakers(id),
+                    best_same_speaker_id INTEGER REFERENCES speakers(id),
+                    best_same_score REAL,
+                    best_cross_speaker_id INTEGER REFERENCES speakers(id),
+                    best_cross_score REAL,
+                    same_threshold REAL NOT NULL,
+                    cross_threshold REAL NOT NULL,
+                    same_candidate_count INTEGER NOT NULL,
+                    cross_candidate_count INTEGER NOT NULL,
+                    ground_truth_speaker_id INTEGER REFERENCES speakers(id)
+                )
+                """)
+            try db.execute(sql: "CREATE INDEX idx_match_decisions_decided_at ON match_decisions(decided_at)")
+            try db.execute(sql: "CREATE INDEX idx_match_decisions_resolved ON match_decisions(resolved_speaker_id)")
+            try db.execute(sql: "CREATE INDEX idx_match_decisions_ground_truth ON match_decisions(ground_truth_speaker_id)")
+
+            // Snapshot scores at the moment of merge. `mergeSpeakers`
+            // reassigns the source's embeddings to the destination, so a
+            // cosine sweep after the fact returns nothing useful. The
+            // audit row captures max same- and cross-context cosines
+            // between source and destination IMMEDIATELY BEFORE the
+            // reassignment, which is the only correct moment to read
+            // the source's evidence.
+            try db.execute(sql: """
+                CREATE TABLE merge_audit (
+                    id INTEGER PRIMARY KEY,
+                    source_speaker_id INTEGER NOT NULL,
+                    destination_speaker_id INTEGER NOT NULL,
+                    merged_at TEXT NOT NULL,
+                    max_same_context_score REAL,
+                    max_cross_context_score REAL
+                )
+                """)
+            try db.execute(sql: "CREATE INDEX idx_merge_audit_destination ON merge_audit(destination_speaker_id)")
         }
         return migrator
     }
@@ -1095,6 +1298,15 @@ actor SpeakerLibrary {
         let destLabel = labels.destLabel
         let movedEmbeddings = labels.movedEmbeddings
 
+        // Audit snapshot. Compute max same/cross-context cosines
+        // BEFORE the embedding UPDATE so source's evidence is still
+        // attached to source. The values are persisted inside the
+        // same write transaction as the merge itself; if the merge
+        // rolls back, the audit row rolls back too. This is the only
+        // moment retroactive analysis can read source's embeddings —
+        // after the UPDATE they all belong to destination.
+        let auditScores = try await computeMergeAuditScores(source: source, destination: destination)
+
         let todaySegments: [SegmentLineSummary] = try await dbQueue.read { db -> [SegmentLineSummary] in
             let rows = try Row.fetchAll(
                 db,
@@ -1140,6 +1352,24 @@ actor SpeakerLibrary {
         let tempPath = tempURL
         do {
             try await dbQueue.write { db in
+                // Audit-snapshot row first — must happen before the
+                // embedding reassignment so the scores attached here
+                // reflect source's evidence at the moment of merge.
+                try db.execute(
+                    sql: """
+                        INSERT INTO merge_audit (
+                            source_speaker_id, destination_speaker_id, merged_at,
+                            max_same_context_score, max_cross_context_score
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                    arguments: [
+                        source,
+                        destination,
+                        SpeakerLibrary.timestampString(),
+                        auditScores.maxSame,
+                        auditScores.maxCross
+                    ]
+                )
                 try db.execute(
                     sql: "UPDATE embeddings SET speaker_id = ? WHERE speaker_id = ?",
                     arguments: [destination, source]
@@ -1151,6 +1381,27 @@ actor SpeakerLibrary {
                 try db.execute(
                     sql: "UPDATE speakers SET merged_into = ? WHERE id = ?",
                     arguments: [destination, source]
+                )
+                // Resolver-telemetry ground-truth backfill. Every prior
+                // match_decisions row that touched `source` (either as
+                // the resolved speaker, or as the best-same / best-cross
+                // candidate, or already-labeled with `source` as a prior
+                // ground truth) now points to `destination` — the user
+                // has effectively said "the right answer for these was
+                // `destination` all along." Transitive merges (A→B→C)
+                // bubble through the prior-ground-truth clause.
+                try db.execute(
+                    sql: """
+                        UPDATE match_decisions
+                        SET ground_truth_speaker_id = ?
+                        WHERE ground_truth_speaker_id = ?
+                           OR (ground_truth_speaker_id IS NULL AND (
+                                  resolved_speaker_id = ?
+                               OR best_same_speaker_id = ?
+                               OR best_cross_speaker_id = ?
+                           ))
+                        """,
+                    arguments: [destination, source, source, source, source]
                 )
                 if needFileRewrite {
                     _ = try FileManager.default.replaceItemAt(targetPath, withItemAt: tempPath)
@@ -2654,6 +2905,416 @@ actor SpeakerLibrary {
         }
         let denom = na.squareRoot() * nb.squareRoot()
         return denom > 0 ? dot / denom : 0
+    }
+
+    // MARK: - Resolver telemetry (write + read)
+
+    /// One row per IdentityResolver decision. Called from
+    /// `IdentityResolver.resolve` on every code path except CACHE-HIT
+    /// (no candidate scores to record). Failures are swallowed — the
+    /// resolver's live path must never throw out into the merge layer.
+    func recordMatchDecision(_ record: MatchDecisionRecord) {
+        do {
+            try dbQueue.write { db in
+                try db.execute(
+                    sql: """
+                        INSERT INTO match_decisions (
+                            decided_at, source, session_id, slot_label, outcome,
+                            resolved_speaker_id,
+                            best_same_speaker_id, best_same_score,
+                            best_cross_speaker_id, best_cross_score,
+                            same_threshold, cross_threshold,
+                            same_candidate_count, cross_candidate_count,
+                            ground_truth_speaker_id
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                        """,
+                    arguments: [
+                        SpeakerLibrary.iso8601Formatter.string(from: record.decidedAt),
+                        record.context.rawValue,
+                        record.sessionID.uuidString,
+                        record.slotLabel,
+                        record.outcome.rawValue,
+                        record.resolvedSpeakerID,
+                        record.bestSameSpeakerID,
+                        record.bestSameScore,
+                        record.bestCrossSpeakerID,
+                        record.bestCrossScore,
+                        record.sameThreshold,
+                        record.crossThreshold,
+                        record.sameCandidateCount,
+                        record.crossCandidateCount
+                    ]
+                )
+            }
+        } catch {
+            log.error("Match-decision write failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Retroactive analysis surface. Reads from the `merge_audit` table
+    /// populated by `mergeSpeakers` at the moment of each merge — that
+    /// is the only correct read because `mergeSpeakers` reassigns the
+    /// source's embeddings to the destination, so a post-merge cosine
+    /// sweep would find nothing on the source side.
+    func historicalMergePairScores() throws -> [HistoricalMergeScore] {
+        try dbQueue.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT ma.source_speaker_id AS source_id,
+                           ma.destination_speaker_id AS dest_id,
+                           ma.max_same_context_score AS max_same,
+                           ma.max_cross_context_score AS max_cross,
+                           COALESCE(d.name, d.display_label, 'Speaker ?') AS dest_label
+                    FROM merge_audit ma
+                    LEFT JOIN speakers d ON d.id = ma.destination_speaker_id
+                    ORDER BY ma.merged_at ASC
+                    """
+            )
+            return rows.map { row -> HistoricalMergeScore in
+                HistoricalMergeScore(
+                    sourceSpeakerID: row["source_id"],
+                    destinationSpeakerID: row["dest_id"],
+                    destinationLabel: row["dest_label"] ?? "Speaker ?",
+                    maxSameContextScore: row["max_same"],
+                    maxCrossContextScore: row["max_cross"]
+                )
+            }
+        }
+    }
+
+    /// Compute the max same- and cross-context cosines between two
+    /// speakers' embeddings as they currently sit on disk. Called by
+    /// `mergeSpeakers` immediately before reassigning embeddings.
+    /// Returns nil for either score when one side has no embeddings in
+    /// the relevant context bag.
+    private func computeMergeAuditScores(
+        source: Int64,
+        destination: Int64
+    ) async throws -> (maxSame: Double?, maxCross: Double?) {
+        try await dbQueue.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT speaker_id, context, vector FROM embeddings WHERE speaker_id IN (?, ?)",
+                arguments: [source, destination]
+            )
+            var srcMic: [[Float]] = []
+            var srcSys: [[Float]] = []
+            var dstMic: [[Float]] = []
+            var dstSys: [[Float]] = []
+            for row in rows {
+                let sid: Int64 = row["speaker_id"]
+                let ctx: String = row["context"] ?? "mic"
+                guard let blob: Data = row["vector"] else { continue }
+                let count = blob.count / MemoryLayout<Float>.size
+                guard count > 0 else { continue }
+                let vector: [Float] = blob.withUnsafeBytes { raw in
+                    let floats = raw.bindMemory(to: Float.self)
+                    return Array(floats.prefix(count))
+                }
+                switch (sid == source, ctx) {
+                case (true, "mic"): srcMic.append(vector)
+                case (true, _): srcSys.append(vector)
+                case (false, "mic"): dstMic.append(vector)
+                case (false, _): dstSys.append(vector)
+                }
+            }
+            let sameMic = Self.maxCosineOrNil(srcMic, dstMic)
+            let sameSys = Self.maxCosineOrNil(srcSys, dstSys)
+            let crossA = Self.maxCosineOrNil(srcMic, dstSys)
+            let crossB = Self.maxCosineOrNil(srcSys, dstMic)
+            return (Self.maxOptional(sameMic, sameSys), Self.maxOptional(crossA, crossB))
+        }
+    }
+
+    /// Pull every labeled NO-MATCH row from `match_decisions` (rows whose
+    /// `ground_truth_speaker_id` has been backfilled by a user merge),
+    /// joined with `speakers.name` on the best-candidate columns so the
+    /// stats math can ask "was the wrong best-candidate a NAMED speaker?"
+    /// — which is the proxy for "lowering the threshold here would have
+    /// merged this voice into the wrong NAMED person."
+    func labeledMissDecisions() throws -> [LabeledMissRow] {
+        try dbQueue.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT md.source AS source,
+                           md.ground_truth_speaker_id AS gt,
+                           md.best_same_speaker_id AS best_same,
+                           md.best_same_score AS best_same_score,
+                           md.best_cross_speaker_id AS best_cross,
+                           md.best_cross_score AS best_cross_score,
+                           md.same_threshold AS same_threshold,
+                           md.cross_threshold AS cross_threshold,
+                           s_same.name AS best_same_name,
+                           s_cross.name AS best_cross_name
+                    FROM match_decisions md
+                    LEFT JOIN speakers s_same ON s_same.id = md.best_same_speaker_id
+                    LEFT JOIN speakers s_cross ON s_cross.id = md.best_cross_speaker_id
+                    WHERE md.outcome = 'no-match'
+                      AND md.ground_truth_speaker_id IS NOT NULL
+                    """
+            )
+            return rows.compactMap { row -> LabeledMissRow? in
+                let sourceRaw: String = row["source"] ?? "mic"
+                guard let context = Context(rawValue: sourceRaw) else { return nil }
+                let gt: Int64 = row["gt"]
+                let bestSameID: Int64? = row["best_same"]
+                let bestSameScore: Double? = row["best_same_score"]
+                let bestCrossID: Int64? = row["best_cross"]
+                let bestCrossScore: Double? = row["best_cross_score"]
+                let sameThreshold: Double = row["same_threshold"] ?? 0
+                let crossThreshold: Double = row["cross_threshold"] ?? 0
+                let bestSameName: String? = row["best_same_name"]
+                let bestCrossName: String? = row["best_cross_name"]
+                let sameScore: Double? = (bestSameID == gt) ? bestSameScore : nil
+                let crossScore: Double? = (bestCrossID == gt) ? bestCrossScore : nil
+                let bestSameWasNamedNonMatch = (bestSameID != nil)
+                    && (bestSameID != gt)
+                    && (bestSameName != nil)
+                let bestCrossWasNamedNonMatch = (bestCrossID != nil)
+                    && (bestCrossID != gt)
+                    && (bestCrossName != nil)
+                return LabeledMissRow(
+                    context: context,
+                    groundTruthSpeakerID: gt,
+                    sameScore: sameScore,
+                    crossScore: crossScore,
+                    sameThreshold: sameThreshold,
+                    crossThreshold: crossThreshold,
+                    bestSameWasNamedNonMatch: bestSameWasNamedNonMatch,
+                    bestCrossWasNamedNonMatch: bestCrossWasNamedNonMatch
+                )
+            }
+        }
+    }
+
+    /// One-shot aggregate the curation window renders inside its
+    /// disclosure section. Combines:
+    ///  - Retroactive merge analysis (works on existing data).
+    ///  - Live decision telemetry (sharper, only available going forward).
+    /// Returns coarse stats — the user does not need raw rows here, just
+    /// "is the threshold too strict, and by how much."
+    func matchDecisionStats(
+        currentSameThreshold: Double = IdentityResolver.defaultSameContextThreshold,
+        currentCrossThreshold: Double = IdentityResolver.defaultCrossContextThreshold,
+        thresholdSweep: [Double] = [0.50, 0.55, 0.58, 0.60, 0.62, 0.65, 0.68, 0.70, 0.72, 0.75]
+    ) throws -> MatchDecisionStats {
+        let live = try labeledMissDecisions()
+        let historical = try historicalMergePairScores()
+
+        let liveTotal: Int = try dbQueue.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM match_decisions") ?? 0
+        }
+        let liveNoMatchTotal: Int = try dbQueue.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM match_decisions WHERE outcome = 'no-match'") ?? 0
+        }
+
+        // Combine live + historical scores for the score-distribution
+        // histograms. Live rows carry the score against the correct
+        // speaker AT decision time (sharper). Historical rows carry the
+        // score AS OF NOW (upper bound). Both are inputs to "what would
+        // a lower threshold have caught."
+        var sameScores: [Double] = []
+        var crossScores: [Double] = []
+        for row in live {
+            if let s = row.sameScore { sameScores.append(s) }
+            if let s = row.crossScore { crossScores.append(s) }
+        }
+        for h in historical {
+            if let s = h.maxSameContextScore { sameScores.append(s) }
+            if let s = h.maxCrossContextScore { crossScores.append(s) }
+        }
+
+        let sameHist = Self.histogram(scores: sameScores)
+        let crossHist = Self.histogram(scores: crossScores)
+
+        // Source clustering: only live rows know the source pipeline
+        // (historical merges don't carry one). Counted on labeled
+        // NO-MATCH rows.
+        var micMiss = 0
+        var systemMiss = 0
+        for row in live {
+            if row.context == .mic { micMiss += 1 } else { systemMiss += 1 }
+        }
+
+        // Per-speaker clustering: top 10 ground-truth speakers by miss count.
+        var perSpeaker: [Int64: (count: Int, scores: [Double])] = [:]
+        for row in live {
+            var entry = perSpeaker[row.groundTruthSpeakerID] ?? (count: 0, scores: [])
+            entry.count += 1
+            if let s = row.sameScore { entry.scores.append(s) }
+            else if let s = row.crossScore { entry.scores.append(s) }
+            perSpeaker[row.groundTruthSpeakerID] = entry
+        }
+        // Historical merges also surface a ground-truth speaker (the
+        // destination of the merge). Each pair counts once.
+        for h in historical {
+            var entry = perSpeaker[h.destinationSpeakerID] ?? (count: 0, scores: [])
+            entry.count += 1
+            if let s = h.maxSameContextScore { entry.scores.append(s) }
+            else if let s = h.maxCrossContextScore { entry.scores.append(s) }
+            perSpeaker[h.destinationSpeakerID] = entry
+        }
+
+        let speakerLabels: [Int64: String] = try dbQueue.read { db in
+            let ids = Array(perSpeaker.keys)
+            guard !ids.isEmpty else { return [:] }
+            let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT id, COALESCE(name, display_label, 'Speaker ?') AS label
+                    FROM speakers
+                    WHERE id IN (\(placeholders))
+                    """,
+                arguments: StatementArguments(ids)
+            )
+            var map: [Int64: String] = [:]
+            for row in rows {
+                let id: Int64 = row["id"]
+                map[id] = row["label"] ?? "Speaker ?"
+            }
+            return map
+        }
+
+        let topMissed = perSpeaker
+            .map { (id, entry) -> MatchDecisionStats.PerSpeakerMissRow in
+                MatchDecisionStats.PerSpeakerMissRow(
+                    speakerID: id,
+                    label: speakerLabels[id] ?? "Speaker ?",
+                    missCount: entry.count,
+                    medianNearMissScore: Self.median(entry.scores)
+                )
+            }
+            .sorted { lhs, rhs in
+                if lhs.missCount != rhs.missCount { return lhs.missCount > rhs.missCount }
+                return lhs.speakerID < rhs.speakerID
+            }
+            .prefix(10)
+
+        // Threshold sweep. True-positives count past misses we'd have
+        // caught at the candidate threshold; false-positives count past
+        // misses where the wrong best-candidate was a NAMED speaker that
+        // we'd have wrongly merged into. Same-context and cross-context
+        // are computed independently.
+        var sweep: [MatchDecisionStats.ThresholdSweepRow] = []
+        sweep.reserveCapacity(thresholdSweep.count)
+        for t in thresholdSweep {
+            var sameTP = 0, sameFP = 0, crossTP = 0, crossFP = 0
+            for row in live {
+                if let s = row.sameScore, s >= t { sameTP += 1 }
+                if row.bestSameWasNamedNonMatch {
+                    // Use the historical row's actual score against the named
+                    // non-match; we don't store it separately, so this is a
+                    // proxy: the score we DID store (against ground truth) is
+                    // a lower bound, so we only count if either score is ≥ t.
+                    // The labeled-miss row's `sameScore` (if not nil) carries
+                    // the ground-truth score; if nil, ground truth wasn't top,
+                    // and the named non-match had a higher score by definition.
+                    if row.sameScore == nil { sameFP += 1 }
+                    else if let s = row.sameScore, s < t {
+                        // ground-truth score < t but the named non-match's
+                        // score is unknown vs t. Conservative: count.
+                        // This is an upper-bound estimate of FP, intentional
+                        // so we err on the side of caution when recommending.
+                        sameFP += 1
+                    }
+                }
+                if let s = row.crossScore, s >= t { crossTP += 1 }
+                if row.bestCrossWasNamedNonMatch {
+                    if row.crossScore == nil { crossFP += 1 }
+                    else if let s = row.crossScore, s < t { crossFP += 1 }
+                }
+            }
+            for h in historical {
+                if let s = h.maxSameContextScore, s >= t { sameTP += 1 }
+                if let s = h.maxCrossContextScore, s >= t { crossTP += 1 }
+            }
+            sweep.append(MatchDecisionStats.ThresholdSweepRow(
+                threshold: t,
+                sameContextTruePositives: sameTP,
+                sameContextFalsePositives: sameFP,
+                crossContextTruePositives: crossTP,
+                crossContextFalsePositives: crossFP
+            ))
+        }
+
+        return MatchDecisionStats(
+            currentSameThreshold: currentSameThreshold,
+            currentCrossThreshold: currentCrossThreshold,
+            liveDecisionTotal: liveTotal,
+            liveNoMatchTotal: liveNoMatchTotal,
+            liveLabeledMissTotal: live.count,
+            historicalMergePairCount: historical.count,
+            sameContextHistogram: sameHist,
+            crossContextHistogram: crossHist,
+            medianSameContextNearMiss: Self.median(sameScores),
+            medianCrossContextNearMiss: Self.median(crossScores),
+            micMissCount: micMiss,
+            systemMissCount: systemMiss,
+            topMissedSpeakers: Array(topMissed),
+            thresholdSweep: sweep
+        )
+    }
+
+    // MARK: - Telemetry helpers (nonisolated so tests / aggregation
+    //         math can be exercised without hopping the actor)
+
+    /// 20 fixed bins of width 0.05 from 0.0 to 1.0. Scores outside that
+    /// range are clamped to the first / last bin. Empty score arrays
+    /// return all-zero bins so the UI never has to special-case empty.
+    nonisolated static func histogram(scores: [Double]) -> [MatchDecisionStats.HistogramBin] {
+        let binWidth = 0.05
+        let binCount = 20
+        var counts = Array(repeating: 0, count: binCount)
+        for s in scores {
+            let clamped = max(0.0, min(0.9999, s))
+            let idx = min(binCount - 1, Int(clamped / binWidth))
+            counts[idx] += 1
+        }
+        return (0..<binCount).map { i in
+            MatchDecisionStats.HistogramBin(
+                lowerBound: Double(i) * binWidth,
+                upperBound: Double(i + 1) * binWidth,
+                count: counts[i]
+            )
+        }
+    }
+
+    nonisolated static func median(_ values: [Double]) -> Double? {
+        guard !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        let mid = sorted.count / 2
+        if sorted.count % 2 == 0 {
+            return (sorted[mid - 1] + sorted[mid]) / 2
+        }
+        return sorted[mid]
+    }
+
+    /// Max cosine across two embedding bags. Returns nil (not -1) when
+    /// either side is empty so the analytics code can distinguish "no
+    /// evidence" from "evidence but distant."
+    nonisolated static func maxCosineOrNil(_ left: [[Float]], _ right: [[Float]]) -> Double? {
+        guard !left.isEmpty, !right.isEmpty else { return nil }
+        var best: Double = -1
+        for l in left {
+            for r in right {
+                let s = cosineSimilarity(l, r)
+                if s > best { best = s }
+            }
+        }
+        return best
+    }
+
+    private nonisolated static func maxOptional(_ a: Double?, _ b: Double?) -> Double? {
+        switch (a, b) {
+        case (nil, nil): return nil
+        case (let x?, nil): return x
+        case (nil, let y?): return y
+        case (let x?, let y?): return max(x, y)
+        }
     }
 
     // MARK: - Test-only setters

@@ -56,6 +56,11 @@ final class SpeakerCurationWindowController {
 final class SpeakerCurationWindowModel {
     var unnamed: [SpeakerLibrary.UnnamedCurationRow] = []
     var suggestions: [SpeakerLibrary.MergeSuggestion] = []
+    /// Resolver score distribution + threshold-sweep aggregate. Pulled
+    /// on every `refresh()` (after `unnamed` + `suggestions`) so the
+    /// disclosure section in the view reflects the user's most recent
+    /// merge decisions without an explicit refetch.
+    var stats: SpeakerLibrary.MatchDecisionStats?
     var lastError: String?
     var isRefreshing: Bool = false
     /// Per-row in-flight flag keyed by speaker id so the save button
@@ -97,8 +102,10 @@ final class SpeakerCurationWindowModel {
                 ceiling: 0.75,
                 limit: 10
             )
+            async let statsTask = library.matchDecisionStats()
             unnamed = try await unnamedTask
             suggestions = try await suggestionsTask
+            stats = try await statsTask
             lastError = nil
         } catch {
             log.error("Curation refresh failed: \(error.localizedDescription, privacy: .public)")
@@ -167,6 +174,10 @@ struct SpeakerCurationWindowView: View {
     /// Per-row name drafts so each row owns its TextField text without
     /// the model holding a string for every speaker.
     @State private var drafts: [Int64: String] = [:]
+    /// DisclosureGroup expansion state for the resolver-stats section.
+    /// Collapsed by default so the section doesn't crowd the curation
+    /// flow; opens on demand when the user wants to inspect thresholds.
+    @State private var statsExpanded: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -176,6 +187,7 @@ struct SpeakerCurationWindowView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     unnamedSection
                     suggestionsSection
+                    statsSection
                 }
                 .padding(.vertical, 4)
             }
@@ -388,5 +400,209 @@ struct SpeakerCurationWindowView: View {
             .disabled(model.inFlightMerges.contains(suggestion.id))
         }
         .padding(.vertical, 2)
+    }
+
+    // MARK: resolver score distribution
+
+    /// Collapsible section that answers "why am I doing all this manual
+    /// merge work?" — combines retroactive analysis (works on existing
+    /// merges) with prospective decision telemetry (sharper, populates
+    /// going forward). Hidden behind a DisclosureGroup so the section
+    /// doesn't crowd the curation flow.
+    @ViewBuilder
+    private var statsSection: some View {
+        GroupBox {
+            DisclosureGroup(isExpanded: $statsExpanded) {
+                statsBody
+            } label: {
+                statsHeaderRow
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var statsHeaderRow: some View {
+        let stats = model.stats
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text("Resolver score distribution")
+                .font(.headline)
+            if let s = stats {
+                Text(statsSummary(s))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("loading…")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private func statsSummary(_ s: SpeakerLibrary.MatchDecisionStats) -> String {
+        let medSame = s.medianSameContextNearMiss.map { String(format: "%.3f", $0) } ?? "n/a"
+        let medCross = s.medianCrossContextNearMiss.map { String(format: "%.3f", $0) } ?? "n/a"
+        return "median miss vs correct speaker — same \(medSame) (threshold \(String(format: "%.2f", s.currentSameThreshold))) · cross \(medCross) (threshold \(String(format: "%.2f", s.currentCrossThreshold)))"
+    }
+
+    @ViewBuilder
+    private var statsBody: some View {
+        if let s = model.stats {
+            VStack(alignment: .leading, spacing: 12) {
+                statsOverviewRow(s)
+                Divider()
+                statsHistogramRow(s)
+                Divider()
+                statsSweepTable(s)
+                Divider()
+                statsClusteringRow(s)
+                Text("Near-miss = cosine vs. the correct speaker on past splits the user later merged. Same-context = mic↔mic / system↔system; cross-context = mic↔system. The current thresholds appear in the histograms as red vertical lines.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.top, 4)
+        } else {
+            Text("Stats unavailable.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(8)
+        }
+    }
+
+    @ViewBuilder
+    private func statsOverviewRow(_ s: SpeakerLibrary.MatchDecisionStats) -> some View {
+        HStack(alignment: .top, spacing: 24) {
+            statsKV("Historical merges", "\(s.historicalMergePairCount)")
+            statsKV("Live decisions", "\(s.liveDecisionTotal)")
+            statsKV("Labeled misses", "\(s.liveLabeledMissTotal) / \(s.liveNoMatchTotal) NO-MATCH")
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private func statsKV(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.callout.monospaced())
+        }
+    }
+
+    @ViewBuilder
+    private func statsHistogramRow(_ s: SpeakerLibrary.MatchDecisionStats) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Score distribution (near-miss vs. correct speaker)")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            histogramBar(title: "same-context", bins: s.sameContextHistogram, threshold: s.currentSameThreshold)
+            histogramBar(title: "cross-context", bins: s.crossContextHistogram, threshold: s.currentCrossThreshold)
+        }
+    }
+
+    @ViewBuilder
+    private func histogramBar(title: String, bins: [SpeakerLibrary.MatchDecisionStats.HistogramBin], threshold: Double) -> some View {
+        let maxCount = max(1, bins.map(\.count).max() ?? 1)
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption2.monospaced())
+                .foregroundStyle(.tertiary)
+            GeometryReader { geo in
+                let totalWidth = geo.size.width
+                let barWidth = totalWidth / CGFloat(bins.count)
+                ZStack(alignment: .bottomLeading) {
+                    HStack(alignment: .bottom, spacing: 1) {
+                        ForEach(bins) { bin in
+                            Rectangle()
+                                .fill(bin.lowerBound >= threshold ? Color.green.opacity(0.55) : Color.blue.opacity(0.55))
+                                .frame(width: max(0, barWidth - 1), height: CGFloat(bin.count) / CGFloat(maxCount) * 56)
+                        }
+                    }
+                    .frame(maxHeight: 56, alignment: .bottom)
+                    let thresholdX = CGFloat(threshold) * totalWidth
+                    Rectangle()
+                        .fill(Color.red)
+                        .frame(width: 1, height: 56)
+                        .offset(x: thresholdX, y: 0)
+                }
+            }
+            .frame(height: 56)
+            HStack {
+                Text("0.0").font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                Spacer()
+                Text("0.5").font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                Spacer()
+                Text("1.0").font(.caption2.monospaced()).foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func statsSweepTable(_ s: SpeakerLibrary.MatchDecisionStats) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Threshold sweep — at each candidate gate, past misses caught / wrong-named-merges incurred")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                Text("threshold").font(.caption2.monospaced()).foregroundStyle(.tertiary).frame(width: 70, alignment: .leading)
+                Text("same-ctx TP / FP").font(.caption2.monospaced()).foregroundStyle(.tertiary).frame(width: 130, alignment: .leading)
+                Text("cross-ctx TP / FP").font(.caption2.monospaced()).foregroundStyle(.tertiary).frame(width: 130, alignment: .leading)
+                Spacer()
+            }
+            ForEach(s.thresholdSweep) { row in
+                let isCurrentSame = abs(row.threshold - s.currentSameThreshold) < 0.001
+                let isCurrentCross = abs(row.threshold - s.currentCrossThreshold) < 0.001
+                HStack(spacing: 12) {
+                    HStack(spacing: 4) {
+                        Text(String(format: "%.2f", row.threshold))
+                            .font(.caption.monospaced())
+                        if isCurrentSame {
+                            Text("(same)").font(.caption2).foregroundStyle(.red.opacity(0.8))
+                        }
+                        if isCurrentCross {
+                            Text("(cross)").font(.caption2).foregroundStyle(.red.opacity(0.8))
+                        }
+                    }
+                    .frame(width: 70, alignment: .leading)
+                    Text("\(row.sameContextTruePositives) / \(row.sameContextFalsePositives)")
+                        .font(.caption.monospaced())
+                        .frame(width: 130, alignment: .leading)
+                    Text("\(row.crossContextTruePositives) / \(row.crossContextFalsePositives)")
+                        .font(.caption.monospaced())
+                        .frame(width: 130, alignment: .leading)
+                    Spacer()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func statsClusteringRow(_ s: SpeakerLibrary.MatchDecisionStats) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Where misses cluster")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            HStack(spacing: 24) {
+                statsKV("mic misses", "\(s.micMissCount)")
+                statsKV("system misses", "\(s.systemMissCount)")
+                Spacer()
+            }
+            if !s.topMissedSpeakers.isEmpty {
+                Text("Top missed speakers")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                ForEach(s.topMissedSpeakers) { row in
+                    HStack {
+                        Text(row.label).font(.caption.monospaced())
+                        Spacer()
+                        Text("\(row.missCount) miss\(row.missCount == 1 ? "" : "es")")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                        if let m = row.medianNearMissScore {
+                            Text("median \(String(format: "%.3f", m))")
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
     }
 }
