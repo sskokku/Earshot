@@ -65,8 +65,47 @@ final class LiveTranscript {
         }
     }
 
+    /// In-memory representation of a user-dropped bookmark. The id is
+    /// the SQLite row id from `SpeakerLibrary.Bookmark.id` so the panel
+    /// can de-duplicate if the same bookmark is appended twice (defensive
+    /// — the current call site only appends once per drop).
+    struct BookmarkEntry: Identifiable, Equatable {
+        let id: Int64
+        let capturedAt: Date
+        let label: String
+    }
+
+    /// One row in the merged display order. The panel iterates this so
+    /// segments and bookmarks render in chronological order without the
+    /// view layer juggling two arrays. Stable across rebuilds because
+    /// `id` carries the underlying row identity.
+    enum DisplayEntry: Identifiable, Equatable {
+        case segment(Segment)
+        case bookmark(BookmarkEntry)
+
+        var id: String {
+            switch self {
+            case .segment(let s): return "seg-\(s.id.uuidString)"
+            case .bookmark(let b): return "bm-\(b.id)"
+            }
+        }
+
+        var timestamp: Date {
+            switch self {
+            case .segment(let s): return s.startedAt
+            case .bookmark(let b): return b.capturedAt
+            }
+        }
+    }
+
     /// Most recent finalized segments, oldest first. Capped at `maxSegments`.
     private(set) var segments: [Segment] = []
+
+    /// User bookmarks dropped during the current panel lifetime. The
+    /// reader window backfills historical bookmarks from the .md file
+    /// directly; this array is panel-session-scoped, matching the
+    /// segments behavior.
+    private(set) var bookmarks: [BookmarkEntry] = []
 
     /// Text being spoken right now. Empty between utterances.
     var provisional: String = ""
@@ -74,12 +113,53 @@ final class LiveTranscript {
     /// Cap for in-memory display. The disk transcript is the source of truth.
     let maxSegments: Int = 200
 
+    /// Cap for in-memory bookmark display. A handful per session is
+    /// typical; the cap defends against a hotkey held down accidentally.
+    let maxBookmarks: Int = 50
+
+    /// Merged chronological view used by the panel. Segments win ties on
+    /// equal timestamps so a bookmark dropped on the same instant as a
+    /// segment renders just after the line it labels — which reads more
+    /// naturally ("she said X — bookmark: 'key decision'").
+    var displayEntries: [DisplayEntry] {
+        var merged: [DisplayEntry] = []
+        merged.reserveCapacity(segments.count + bookmarks.count)
+        for s in segments { merged.append(.segment(s)) }
+        for b in bookmarks { merged.append(.bookmark(b)) }
+        merged.sort { lhs, rhs in
+            if lhs.timestamp == rhs.timestamp {
+                switch (lhs, rhs) {
+                case (.segment, .bookmark): return true
+                case (.bookmark, .segment): return false
+                default: return false
+                }
+            }
+            return lhs.timestamp < rhs.timestamp
+        }
+        return merged
+    }
+
     func appendFinalized(_ segment: Segment) {
         segments.append(segment)
         if segments.count > maxSegments {
             segments.removeFirst(segments.count - maxSegments)
         }
         provisional = ""
+    }
+
+    /// Append a freshly-dropped bookmark to the live display. Idempotent
+    /// on `id` so a duplicate call (e.g. retried delivery) doesn't double
+    /// the divider. Replaces an earlier entry if the bookmark was renamed
+    /// (not currently supported, but cheap to handle).
+    func appendBookmark(_ bookmark: BookmarkEntry) {
+        if let idx = bookmarks.firstIndex(where: { $0.id == bookmark.id }) {
+            bookmarks[idx] = bookmark
+        } else {
+            bookmarks.append(bookmark)
+        }
+        if bookmarks.count > maxBookmarks {
+            bookmarks.removeFirst(bookmarks.count - maxBookmarks)
+        }
     }
 
     func updateProvisional(_ text: String) {

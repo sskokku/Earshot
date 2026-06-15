@@ -2272,3 +2272,167 @@ extension SpeakerLibrary {
         try self.testForceMergedInto(source: source, into: destination)
     }
 }
+
+// MARK: - Bookmark rendering (panel + reader divider)
+
+/// Cover the end-to-end of bookmark divider rendering: the parser round-
+/// trips with the writer's format, the writer actually emits that line
+/// into the day's `.md`, the live transcript merges segments + bookmarks
+/// chronologically, and the in-memory bookmark store stays bounded.
+@MainActor
+struct BookmarkRenderingTests {
+
+    @Test
+    func parseBookmarkLineRoundTripsWriterFormat() {
+        let parsed = SpeakerLibrary.parseBookmarkLine("bookmark 14:30:00 - JC 1:1 start")
+        #expect(parsed?.time == "14:30:00")
+        #expect(parsed?.label == "JC 1:1 start")
+    }
+
+    @Test
+    func parseBookmarkLineKeepsEmbeddedHyphensInLabel() {
+        // Hyphens after the leading ` - ` separator must survive — the
+        // parser greedily takes everything as the label.
+        let parsed = SpeakerLibrary.parseBookmarkLine("bookmark 09:00:00 - AM - standup")
+        #expect(parsed?.time == "09:00:00")
+        #expect(parsed?.label == "AM - standup")
+    }
+
+    @Test
+    func parseBookmarkLineRejectsCanonicalSegmentLine() {
+        // A normal segment line must not look like a bookmark.
+        let parsed = SpeakerLibrary.parseBookmarkLine("[14:30:00] [mic] Speaker 1: hello")
+        #expect(parsed == nil)
+    }
+
+    @Test
+    func parseBookmarkLineRejectsPauseMarker() {
+        #expect(SpeakerLibrary.parseBookmarkLine("paused 14:30:00") == nil)
+    }
+
+    @Test
+    func parseBookmarkLineRejectsEmptyLabel() {
+        // The writer never emits an empty-label divider, but the parser
+        // must reject it defensively in case the file was edited by hand.
+        #expect(SpeakerLibrary.parseBookmarkLine("bookmark 14:30:00 - ") == nil)
+    }
+
+    @Test
+    func transcriptWriterAppendsBookmarkLine() async throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("EarShotBookmarkWriter-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let writer = TranscriptWriter(folder: folder)
+        let when = ISO8601DateFormatter().date(from: "2026-06-15T14:30:00Z")!
+        let dateKey = DateFormatter.dateKeyLocal.string(from: when)
+        await writer.appendBookmark(label: "JC 1:1 start", at: when)
+        await writer.close()
+
+        let url = folder.appendingPathComponent("\(dateKey).md")
+        let body = try String(contentsOf: url, encoding: .utf8)
+        let bookmarkLine = body.components(separatedBy: "\n").first { $0.hasPrefix("bookmark ") }
+        let parsed = bookmarkLine.flatMap(SpeakerLibrary.parseBookmarkLine)
+        #expect(parsed?.label == "JC 1:1 start")
+        // Header still there — append-only invariant respected.
+        #expect(body.hasPrefix("# \(dateKey)"))
+    }
+
+    @Test
+    func transcriptWriterSanitizesNewlinesInBookmarkLabel() async throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("EarShotBookmarkSanitize-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let writer = TranscriptWriter(folder: folder)
+        let when = ISO8601DateFormatter().date(from: "2026-06-15T14:30:00Z")!
+        let dateKey = DateFormatter.dateKeyLocal.string(from: when)
+        await writer.appendBookmark(label: "Two\nlines", at: when)
+        await writer.close()
+
+        let url = folder.appendingPathComponent("\(dateKey).md")
+        let body = try String(contentsOf: url, encoding: .utf8)
+        let bookmarkLines = body.components(separatedBy: "\n").filter { $0.hasPrefix("bookmark ") }
+        #expect(bookmarkLines.count == 1)
+        // The embedded newline was replaced with a space, so the divider
+        // remains a single parseable line.
+        #expect(bookmarkLines.first?.contains("Two lines") == true)
+    }
+
+    @Test
+    func liveTranscriptDisplayEntriesMergeByTimestamp() {
+        let transcript = LiveTranscript()
+        let t0 = Date(timeIntervalSince1970: 1000)
+        let t1 = Date(timeIntervalSince1970: 1010)
+        let t2 = Date(timeIntervalSince1970: 1020)
+        let s0 = LiveTranscript.Segment(
+            id: UUID(),
+            startedAt: t0,
+            endedAt: t0.addingTimeInterval(2),
+            source: .mic,
+            speakerLabel: "Speaker 1",
+            text: "hello"
+        )
+        let s2 = LiveTranscript.Segment(
+            id: UUID(),
+            startedAt: t2,
+            endedAt: t2.addingTimeInterval(2),
+            source: .mic,
+            speakerLabel: "Speaker 1",
+            text: "still talking"
+        )
+        let bookmark = LiveTranscript.BookmarkEntry(id: 1, capturedAt: t1, label: "midpoint")
+        transcript.appendFinalized(s0)
+        transcript.appendFinalized(s2)
+        transcript.appendBookmark(bookmark)
+
+        let entries = transcript.displayEntries
+        #expect(entries.count == 3)
+        if case .segment(let seg) = entries[0] { #expect(seg.id == s0.id) } else { Issue.record("entry 0 not segment") }
+        if case .bookmark(let bm) = entries[1] { #expect(bm.id == 1) } else { Issue.record("entry 1 not bookmark") }
+        if case .segment(let seg) = entries[2] { #expect(seg.id == s2.id) } else { Issue.record("entry 2 not segment") }
+    }
+
+    @Test
+    func liveTranscriptBookmarksCapAtMaxBookmarks() {
+        let transcript = LiveTranscript()
+        // One more than the cap; the oldest should be dropped FIFO.
+        let cap = transcript.maxBookmarks
+        for i in 0..<(cap + 5) {
+            transcript.appendBookmark(LiveTranscript.BookmarkEntry(
+                id: Int64(i),
+                capturedAt: Date(timeIntervalSince1970: Double(1000 + i)),
+                label: "b\(i)"
+            ))
+        }
+        #expect(transcript.bookmarks.count == cap)
+        // Oldest survivors should be the (cap+5 - cap) = 5th id forward.
+        #expect(transcript.bookmarks.first?.id == 5)
+        #expect(transcript.bookmarks.last?.id == Int64(cap + 4))
+    }
+
+    @Test
+    func liveTranscriptAppendBookmarkIsIdempotentOnID() {
+        let transcript = LiveTranscript()
+        let when = Date(timeIntervalSince1970: 1000)
+        transcript.appendBookmark(LiveTranscript.BookmarkEntry(id: 7, capturedAt: when, label: "first"))
+        transcript.appendBookmark(LiveTranscript.BookmarkEntry(id: 7, capturedAt: when, label: "first again"))
+        #expect(transcript.bookmarks.count == 1)
+        #expect(transcript.bookmarks.first?.label == "first again")
+    }
+}
+
+private extension DateFormatter {
+    /// Mirror of `TranscriptWriter.dateKeyFormatter` so the bookmark
+    /// writer test can derive the day key the writer used. Local time —
+    /// matches the writer's `Calendar(identifier: .gregorian)` default.
+    static let dateKeyLocal: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+}

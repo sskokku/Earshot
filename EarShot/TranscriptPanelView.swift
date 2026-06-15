@@ -44,13 +44,21 @@ struct TranscriptPanelView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 8) {
-                        if appState.transcript.segments.isEmpty && appState.transcript.provisional.isEmpty {
+                        if appState.transcript.segments.isEmpty
+                            && appState.transcript.bookmarks.isEmpty
+                            && appState.transcript.provisional.isEmpty {
                             placeholder
                         }
 
-                        ForEach(appState.transcript.segments) { segment in
-                            segmentRow(segment)
-                                .id(segment.id)
+                        ForEach(appState.transcript.displayEntries) { entry in
+                            switch entry {
+                            case .segment(let segment):
+                                segmentRow(segment)
+                                    .id(entry.id)
+                            case .bookmark(let bookmark):
+                                bookmarkDivider(bookmark)
+                                    .id(entry.id)
+                            }
                         }
 
                         if !appState.transcript.provisional.isEmpty {
@@ -62,6 +70,9 @@ struct TranscriptPanelView: View {
                     .padding(10)
                 }
                 .onChange(of: appState.transcript.segments.count) { _, _ in
+                    scrollToBottom(proxy)
+                }
+                .onChange(of: appState.transcript.bookmarks.count) { _, _ in
                     scrollToBottom(proxy)
                 }
                 .onChange(of: appState.transcript.provisional) { _, _ in
@@ -90,7 +101,7 @@ struct TranscriptPanelView: View {
             withAnimation(.easeOut(duration: 0.15)) {
                 proxy.scrollTo(provisionalAnchorID, anchor: .bottom)
             }
-        } else if let last = appState.transcript.segments.last {
+        } else if let last = appState.transcript.displayEntries.last {
             withAnimation(.easeOut(duration: 0.15)) {
                 proxy.scrollTo(last.id, anchor: .bottom)
             }
@@ -135,6 +146,39 @@ struct TranscriptPanelView: View {
                 actions.openSpeakerLibrary()
             }
         }
+    }
+
+    /// Inline divider for a user-dropped bookmark. Visually distinct
+    /// from speaker lines: yellow capsule, bookmark glyph, label first
+    /// (the user's intent), timestamp in trailing caption. No source
+    /// tag — bookmarks aren't pipeline-attributed.
+    private func bookmarkDivider(_ bookmark: LiveTranscript.BookmarkEntry) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "bookmark.fill")
+                .font(.caption)
+                .foregroundStyle(.yellow)
+            Text(bookmark.label)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+            Spacer(minLength: 8)
+            Text(Self.timestampFormatter.string(from: bookmark.capturedAt))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.yellow.opacity(0.22))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.yellow.opacity(0.55), lineWidth: 1)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Bookmark: \(bookmark.label) at \(Self.timestampFormatter.string(from: bookmark.capturedAt))")
     }
 
     private func renameMenuTitle(for segment: LiveTranscript.Segment) -> String {

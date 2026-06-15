@@ -64,6 +64,18 @@ final class TranscriptReaderModel {
         let source: String?
         let label: String?
         let body: String?
+        /// Parsed bookmark `(time, label)` if this line is a divider
+        /// written by `TranscriptWriter.appendBookmark`. Mutually
+        /// exclusive with the canonical-segment fields above.
+        let bookmark: BookmarkParsed?
+    }
+
+    /// Parse result for a `bookmark HH:MM:SS - LABEL` line in the day's
+    /// Markdown. Mirrors the live panel's BookmarkEntry shape so the
+    /// reader row can render with the same affordance.
+    struct BookmarkParsed: Equatable {
+        let time: String
+        let label: String
     }
 
     /// What to scroll to + highlight. Matched against the parsed
@@ -103,10 +115,21 @@ final class TranscriptReaderModel {
                         time: p.time,
                         source: p.source,
                         label: p.label,
-                        body: p.text
+                        body: p.text,
+                        bookmark: nil
+                    ))
+                } else if let b = SpeakerLibrary.parseBookmarkLine(line) {
+                    parsed.append(Line(
+                        id: idx,
+                        text: line,
+                        time: nil,
+                        source: nil,
+                        label: nil,
+                        body: nil,
+                        bookmark: BookmarkParsed(time: b.time, label: b.label)
                     ))
                 } else {
-                    parsed.append(Line(id: idx, text: line, time: nil, source: nil, label: nil, body: nil))
+                    parsed.append(Line(id: idx, text: line, time: nil, source: nil, label: nil, body: nil, bookmark: nil))
                 }
             }
             self.lines = parsed
@@ -214,15 +237,49 @@ struct TranscriptReaderWindowView: View {
     @ViewBuilder
     private func row(_ line: TranscriptReaderModel.Line) -> some View {
         let isFocused = (model.focusedLineID == line.id)
-        Text(line.text.isEmpty ? " " : line.text)
-            .font(.system(.body, design: .monospaced))
-            .textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(isFocused ? Color.yellow.opacity(0.28) : Color.clear)
-            )
+        if let bookmark = line.bookmark {
+            bookmarkRow(bookmark, isFocused: isFocused)
+        } else {
+            Text(line.text.isEmpty ? " " : line.text)
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(isFocused ? Color.yellow.opacity(0.28) : Color.clear)
+                )
+        }
+    }
+
+    @ViewBuilder
+    private func bookmarkRow(_ bookmark: TranscriptReaderModel.BookmarkParsed, isFocused: Bool) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "bookmark.fill")
+                .font(.caption)
+                .foregroundStyle(.yellow)
+            Text(bookmark.label)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+            Spacer(minLength: 8)
+            Text(bookmark.time)
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.yellow.opacity(isFocused ? 0.38 : 0.22))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.yellow.opacity(0.55), lineWidth: 1)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Bookmark: \(bookmark.label) at \(bookmark.time)")
     }
 }

@@ -400,6 +400,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 log.info("Bookmark dropped: attached to session id=\(outcome.session.id)")
             }
+            // Render the divider inline in the live panel and persist the
+            // same line into today's Markdown. Both are fire-and-forget
+            // along the success path — the bookmark already committed to
+            // SQLite above, so a panel or disk hiccup at this point logs
+            // a disk error via the writer's standard path (rule 6) and
+            // leaves the DB row intact.
+            let entry = LiveTranscript.BookmarkEntry(
+                id: outcome.bookmark.id,
+                capturedAt: outcome.bookmark.capturedAt,
+                label: outcome.bookmark.label
+            )
+            await MainActor.run { [weak self] in
+                self?.appState.transcript.appendBookmark(entry)
+            }
+            await transcriptWriter.appendBookmark(label: outcome.bookmark.label, at: outcome.bookmark.capturedAt)
         } catch {
             log.error("Bookmark failed: \(error.localizedDescription, privacy: .public)")
             await MainActor.run {

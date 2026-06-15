@@ -110,6 +110,21 @@ actor TranscriptWriter {
         write(line: line, dateKey: key)
     }
 
+    /// User-dropped bookmark divider. The same line ends up rendered as a
+    /// visible divider in the live floating panel and in the
+    /// `TranscriptReaderWindow` (via `SpeakerLibrary.parseBookmarkLine`).
+    /// Format: `bookmark HH:MM:SS - LABEL\n` — matches the existing
+    /// pause/gap marker shape (leading word + time + payload) so the on-disk
+    /// file stays trivially line-greppable. Label is sanitized identically
+    /// to segment text so an embedded newline can never split the marker.
+    func appendBookmark(label: String, at date: Date = Date()) {
+        let key = dateKeyFormatter.string(from: date)
+        let time = timeFormatter.string(from: date)
+        let safeLabel = sanitize(label)
+        let line = "bookmark \(time) - \(safeLabel)\n"
+        write(line: line, dateKey: key)
+    }
+
     /// Append the end-of-day MetricsCollector summary block to a specific
     /// day's Markdown. Closes our open handle first if it points at the same
     /// day so the file is in a known state, writes atomically via a fresh

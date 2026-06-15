@@ -1526,6 +1526,29 @@ actor SpeakerLibrary {
         return (time, source, label, text)
     }
 
+    /// Parse a single transcript line of the bookmark form
+    /// `bookmark HH:MM:SS - LABEL`. Returns nil for anything else
+    /// (canonical segments, headers, pause/resume/gap markers). The
+    /// label is everything after the first ` - ` so embedded hyphens
+    /// inside the label survive round-trip.
+    nonisolated static func parseBookmarkLine(_ line: String) -> (time: String, label: String)? {
+        let prefix = "bookmark "
+        guard line.hasPrefix(prefix) else { return nil }
+        let afterPrefix = line.dropFirst(prefix.count)
+        // HH:MM:SS — exact 8 chars, colon at indices 2 and 5.
+        guard afterPrefix.count >= 8 else { return nil }
+        let time = String(afterPrefix.prefix(8))
+        guard time.count == 8,
+              time[time.index(time.startIndex, offsetBy: 2)] == ":",
+              time[time.index(time.startIndex, offsetBy: 5)] == ":" else { return nil }
+        let rest = afterPrefix.dropFirst(8)
+        let sep = " - "
+        guard rest.hasPrefix(sep) else { return nil }
+        let label = String(rest.dropFirst(sep.count))
+        guard !label.isEmpty else { return nil }
+        return (time, label)
+    }
+
     // MARK: - Sessions and bookmarks
 
     /// A bounded stretch of listening. `endedAt == nil` while the
